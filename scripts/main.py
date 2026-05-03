@@ -129,11 +129,18 @@ def _analyze_single(stock: dict, market_kline: list[dict]) -> dict:
     ind_code = stock.get("industry_code", "")
 
     # 数据
-    stock_kline = get_stock_kline(code, 20)
-    quote = get_stock_quote(code)
+    try:
+        stock_kline = get_stock_kline(code, 20)
+    except Exception:
+        stock_kline = []
+    
+    try:
+        quote = get_stock_quote(code)
+    except Exception:
+        quote = {"price": 0, "pct": 0}
 
     # 构造近 3 个涨停日数据
-    latest_date = stock_kline[-1]["date"] if stock_kline else ""
+    latest_date = stock_kline[-1]["date"] if (stock_kline and len(stock_kline) > 0) else ""
     stock["date"] = stock.get("date") or latest_date
     stock["consecutive"] = stock.get("est_cons", 1)
     recent_lu = [stock]
@@ -147,29 +154,39 @@ def _analyze_single(stock: dict, market_kline: list[dict]) -> dict:
         try:
             industry_components = get_industry_components(ind_code)
         except Exception:
-            pass
+            industry_components = []
 
         # 同行业其他涨停股
-        all_lu = get_limit_up_list()
-        co_list = [
-            lu for lu in all_lu
-            if lu.get("industry_name") == ind_name
-            and lu["code"] != code
-        ]
-        co_limitup_map[stock.get("date", "")] = co_list
-        drive_result = calc_drive_score(code, recent_lu, co_limitup_map, industry_components)
+        try:
+            all_lu = get_limit_up_list()
+            co_list = [
+                lu for lu in all_lu
+                if lu.get("industry_name") == ind_name
+                and lu["code"] != code
+            ]
+            co_limitup_map[stock.get("date", "")] = co_list
+            drive_result = calc_drive_score(code, recent_lu, co_limitup_map, industry_components)
+        except Exception as e:
+            drive_result = {"score": 30, "breakdown": {"error": str(e)}}
 
     # ── 抗跌性 ──
-    anti_drop_result = calc_anti_drop_score(stock_kline, market_kline)
+    try:
+        anti_drop_result = calc_anti_drop_score(stock_kline, market_kline)
+    except Exception as e:
+        anti_drop_result = {"score": 50, "breakdown": {"error": str(e)}}
 
     # ── 领涨性 ──
     if not industry_components and ind_code:
         try:
             industry_components = get_industry_components(ind_code)
         except Exception:
-            pass
+            industry_components = []
+    
     limit_dates = [stock.get("date", "")]
-    leading_result = calc_leading_score(stock_kline, industry_components, limit_dates)
+    try:
+        leading_result = calc_leading_score(stock_kline, industry_components, limit_dates)
+    except Exception as e:
+        leading_result = {"score": 50, "breakdown": {"error": str(e)}}
 
     # ── 资金承接性 ──
     absorption_result = {"score": 50, "breakdown": {"note": "轻量模式"}}
@@ -179,15 +196,20 @@ def _analyze_single(stock: dict, market_kline: list[dict]) -> dict:
             target = get_sector_5min_kline(ind_code)
             if target and len(target) >= 40:
                 absorption_result = calc_absorption_score(ind_code, {ind_code: target})
-        except Exception:
-            pass
+        except Exception as e:
+            absorption_result = {"score": 50, "breakdown": {"error": str(e)}}
 
     # ── 综合 ──
+    drive_score = drive_result.get("score", 30)
+    anti_score = anti_drop_result.get("score", 50)
+    leading_score = leading_result.get("score", 50)
+    absorption_score = absorption_result.get("score", 50)
+    
     composite = (
-        drive_result["score"] * 0.35
-        + anti_drop_result["score"] * 0.15
-        + leading_result["score"] * 0.25
-        + absorption_result["score"] * 0.25
+        drive_score * 0.35
+        + anti_score * 0.15
+        + leading_score * 0.25
+        + absorption_score * 0.25
     )
 
     if composite >= 85:
@@ -226,58 +248,71 @@ def _build_reasons(drive, anti_drop, leading, absorption) -> list[tuple[str, str
     reasons = []
 
     # 带动性
-    ds = drive.get("score", 0)
-    best = drive.get("best_day", {}) or {}
-    bk = best.get("breakdown", {}) or {}
-    voice = bk.get("voice_score", 0)
-    follow = bk.get("follow_score", 0)
-    board = bk.get("board_leadership_score", 0)
-    if ds >= 85:
-        reasons.append(("🐉 带动性",
-            f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，板块共振强劲"))
-    elif ds >= 70:
-        reasons.append(("🐉 带动性",
-            f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，有带动效应"))
-    elif ds >= 50:
-        reasons.append(("🐉 带动性", f"板块效应偏弱"))
-    else:
-        reasons.append(("🐉 带动性", f"数据不足"))
+    try:
+        ds = drive.get("score", 0)
+        best = drive.get("best_day", {}) or {}
+        bk = best.get("breakdown", {}) or {}
+        voice = bk.get("voice_score", 0)
+        follow = bk.get("follow_score", 0)
+        board = bk.get("board_leadership_score", 0)
+        
+        if ds >= 85:
+            reasons.append(("🐉 带动性",
+                f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，板块共振强劲"))
+        elif ds >= 70:
+            reasons.append(("🐉 带动性",
+                f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，有带动效应"))
+        elif ds >= 50:
+            reasons.append(("🐉 带动性", f"板块效应偏弱"))
+        else:
+            reasons.append(("🐉 带动性", f"数据不足"))
+    except Exception:
+        reasons.append(("🐉 带动性", "分析异常"))
 
     # 抗跌性
-    ads = anti_drop.get("score", 0)
-    dc = anti_drop.get("drop_days_count", 0)
-    if ads >= 70:
-        reasons.append(("🛡️ 抗跌性", f"近{dc}次跳水表现坚挺"))
-    elif ads >= 40:
-        reasons.append(("🛡️ 抗跌性", f"近{dc}次跳水抗跌一般"))
-    elif dc > 0:
-        reasons.append(("🛡️ 抗跌性", f"近{dc}次跳水偏弱，警惕系统性风险"))
-    else:
-        reasons.append(("🛡️ 抗跌性", "近期无跳水日，待验证"))
+    try:
+        ads = anti_drop.get("score", 0)
+        dc = anti_drop.get("drop_days_count", 0)
+        if ads >= 70:
+            reasons.append(("🛡️ 抗跌性", f"近{dc}次跳水表现坚挺"))
+        elif ads >= 40:
+            reasons.append(("🛡️ 抗跌性", f"近{dc}次跳水抗跌一般"))
+        elif dc > 0:
+            reasons.append(("🛡️ 抗跌性", f"近{dc}次跳水偏弱，警惕系统性风险"))
+        else:
+            reasons.append(("🛡️ 抗跌性", "近期无跳水日，待验证"))
+    except Exception:
+        reasons.append(("🛡️ 抗跌性", "分析异常"))
 
     # 领涨性
-    lds = leading.get("score", 0)
-    lbk = leading.get("breakdown", {}) or {}
-    rank = lbk.get("avg_pct_rank", 0.5)
-    median = lbk.get("industry_median_pct", 0)
-    if lds >= 70:
-        reasons.append(("📊 领涨性",
-            f"行业排名前{rank*100:.0f}%，跑赢中位数{median:+.1f}%"))
-    elif lds >= 50:
-        reasons.append(("📊 领涨性",
-            f"行业排名约{rank*100:.0f}%分位，与中位数{median:+.1f}%持平"))
-    else:
-        reasons.append(("📊 领涨性", "行业排名靠后"))
+    try:
+        lds = leading.get("score", 0)
+        lbk = leading.get("breakdown", {}) or {}
+        rank = lbk.get("avg_pct_rank", 0.5)
+        median = lbk.get("industry_median_pct", 0)
+        if lds >= 70:
+            reasons.append(("📊 领涨性",
+                f"行业排名前{rank*100:.0f}%，跑赢中位数{median:+.1f}%"))
+        elif lds >= 50:
+            reasons.append(("📊 领涨性",
+                f"行业排名约{rank*100:.0f}%分位，与中位数{median:+.1f}%持平"))
+        else:
+            reasons.append(("📊 领涨性", "行业排名靠后"))
+    except Exception:
+        reasons.append(("📊 领涨性", "分析异常"))
 
     # 资金承接
-    abs_ = absorption.get("score", 0)
-    evt = absorption.get("event_count", 0)
-    if abs_ >= 70:
-        reasons.append(("💰 资金承接", f"发现{evt}次跨板块虹吸事件"))
-    elif abs_ >= 50:
-        reasons.append(("💰 资金承接", "暂无显著跨板块虹吸信号"))
-    else:
-        reasons.append(("💰 资金承接", "资金承接信号弱"))
+    try:
+        abs_ = absorption.get("score", 0)
+        evt = absorption.get("event_count", 0)
+        if abs_ >= 70:
+            reasons.append(("💰 资金承接", f"发现{evt}次跨板块虹吸事件"))
+        elif abs_ >= 50:
+            reasons.append(("💰 资金承接", "暂无显著跨板块虹吸信号"))
+        else:
+            reasons.append(("💰 资金承接", "资金承接信号弱"))
+    except Exception:
+        reasons.append(("💰 资金承接", "分析异常"))
 
     return reasons
 

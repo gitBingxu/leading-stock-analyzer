@@ -249,73 +249,85 @@ def _build_reasons(result: dict) -> list[tuple[str, str]]:
     reasons = []
 
     # 带动性
-    d = result.get("drive", {})
-    ds = d.get("score", 0)
-    best = d.get("best_day", {}) or {}
-    bk = best.get("breakdown", {}) or {}
-    voice = bk.get("voice_score", 0)
-    follow = bk.get("follow_score", 0)
-    board = bk.get("board_leadership_score", 0)
+    try:
+        d = result.get("drive", {})
+        ds = d.get("score", 0)
+        best = d.get("best_day", {}) or {}
+        bk = best.get("breakdown", {}) or {}
+        voice = bk.get("voice_score", 0)
+        follow = bk.get("follow_score", 0)
+        board = bk.get("board_leadership_score", 0)
 
-    if ds >= 85:
-        reasons.append(("🐉 带动性",
-            f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，"
-            f"同板块小弟跟风紧密，实打实的带头大哥"))
-    elif ds >= 70:
-        reasons.append(("🐉 带动性",
-            f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，"
-            f"有带动效应但板块共振还不够强"))
-    elif ds >= 50:
-        reasons.append(("🐉 带动性",
-            f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，"
-            f"带动性一般，板块效应不明显"))
-    else:
-        reasons.append(("🐉 带动性", f"数据不足，无法评估带动效应"))
+        if ds >= 85:
+            reasons.append(("🐉 带动性",
+                f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，"
+                f"同板块小弟跟风紧密，实打实的带头大哥"))
+        elif ds >= 70:
+            reasons.append(("🐉 带动性",
+                f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，"
+                f"有带动效应但板块共振还不够强"))
+        elif ds >= 50:
+            reasons.append(("🐉 带动性",
+                f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board:.0f}，"
+                f"带动性一般，板块效应不明显"))
+        else:
+            reasons.append(("🐉 带动性", f"数据不足，无法评估带动效应"))
+    except Exception:
+        reasons.append(("🐉 带动性", "分析异常"))
 
     # 抗跌性
-    ad = result.get("anti_drop", {})
-    ads = ad.get("score", 0)
-    drop_count = ad.get("drop_days_count", 0)
-    if ads >= 70:
-        reasons.append(("🛡️ 抗跌性",
-            f"近{drop_count}次大盘跳水中表现坚挺，资金承接力强"))
-    elif ads >= 40:
-        reasons.append(("🛡️ 抗跌性",
-            f"近{drop_count}次大盘跳水中抗跌一般，有跟跌倾向"))
-    elif drop_count > 0:
-        reasons.append(("🛡️ 抗跌性",
-            f"近{drop_count}次大盘跳水中表现偏弱，需警惕系统性风险"))
-    else:
-        reasons.append(("🛡️ 抗跌性", "近期无跳水日，抗跌性待验证"))
+    try:
+        ad = result.get("anti_drop", {})
+        ads = ad.get("score", 0)
+        drop_count = ad.get("drop_days_count", 0)
+        if ads >= 70:
+            reasons.append(("🛡️ 抗跌性",
+                f"近{drop_count}次大盘跳水中表现坚挺，资金承接力强"))
+        elif ads >= 40:
+            reasons.append(("🛡️ 抗跌性",
+                f"近{drop_count}次大盘跳水中抗跌一般，有跟跌倾向"))
+        elif drop_count > 0:
+            reasons.append(("🛡️ 抗跌性",
+                f"近{drop_count}次大盘跳水中表现偏弱，需警惕系统性风险"))
+        else:
+            reasons.append(("🛡️ 抗跌性", "近期无跳水日，抗跌性待验证"))
+    except Exception:
+        reasons.append(("🛡️ 抗跌性", "分析异常"))
 
     # 领涨性
-    ld = result.get("leading", {})
-    lds = ld.get("score", 0)
-    lbk = ld.get("breakdown", {}) or {}
-    rank = lbk.get("avg_pct_rank", 0.5)
-    median = lbk.get("industry_median_pct", 0)
-    if lds >= 70:
-        reasons.append(("📊 领涨性",
-            f"行业排名前{rank*100:.0f}%，持续跑赢板块中位数{median:+.1f}%"))
-    elif lds >= 50:
-        reasons.append(("📊 领涨性",
-            f"行业排名约{rank*100:.0f}%分位，与板块中位数{median:+.1f}%持平"))
-    else:
-        reasons.append(("📊 领涨性", f"行业排名靠后，非板块领涨品种"))
+    try:
+        ld = result.get("leading", {})
+        lds = ld.get("score", 0)
+        lbk = ld.get("breakdown", {}) or {}
+        rank = lbk.get("avg_pct_rank", 0.5)
+        median = lbk.get("industry_median_pct", 0)
+        if lds >= 70:
+            reasons.append(("📊 领涨性",
+                f"行业排名前{rank*100:.0f}%，持续跑赢板块中位数{median:+.1f}%"))
+        elif lds >= 50:
+            reasons.append(("📊 领涨性",
+                f"行业排名约{rank*100:.0f}%分位，与板块中位数{median:+.1f}%持平"))
+        else:
+            reasons.append(("📊 领涨性", f"行业排名靠后，非板块领涨品种"))
+    except Exception:
+        reasons.append(("📊 领涨性", "分析异常"))
 
     # 资金承接性
-    ab = result.get("absorption", {})
-    abs_ = ab.get("score", 0)
-    evt = ab.get("event_count", 0)
-    if abs_ >= 70:
-        reasons.append(("💰 资金承接",
-            f"发现{evt}次跨板块虹吸事件，资金主动涌入且持续到收盘"))
-    elif abs_ >= 50:
-        reasons.append(("💰 资金承接",
-            f"暂未发现显著的跨板块资金虹吸信号" if evt == 0 else
-            f"发现{evt}次虹吸事件但强度偏弱"))
-    else:
-        reasons.append(("💰 资金承接", "资金承接信号弱，板块间无资金集中迹象"))
+    try:
+        ab = result.get("absorption", {})
+        abs_ = ab.get("score", 0)
+        evt = ab.get("event_count", 0)
+        if abs_ >= 70:
+            reasons.append(("💰 资金承接",
+                f"发现{evt}次跨板块虹吸事件，资金主动涌入且持续到收盘"))
+        elif abs_ >= 50:
+            reasons.append(("💰 资金承接",
+                f"暂未发现显著的跨板块资金虹吸信号" if evt == 0 else
+                f"发现{evt}次虹吸事件但强度偏弱"))
+        else:
+            reasons.append(("💰 资金承接", "资金承接信号弱，板块间无资金集中迹象"))
+    except Exception:
+        reasons.append(("💰 资金承接", "分析异常"))
 
     return reasons
 

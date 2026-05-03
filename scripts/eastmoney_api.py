@@ -56,7 +56,7 @@ def get_limit_up_list(date: Optional[str] = None) -> list[dict]:
         "pn": "1", "pz": "200", "po": "1", "np": "1",
         "fltt": "2", "invt": "2", "fid": "f3",
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-        "fields": "f12,f14,f3,f8,f6,f100,f102,f26",
+        "fields": "f12,f14,f3,f8,f6,f100,f102,f26,f184,f186",
     }
     qs = urllib.parse.urlencode(params)
     _load_industry_map()
@@ -68,11 +68,17 @@ def get_limit_up_list(date: Optional[str] = None) -> list[dict]:
         if isinstance(pct, str):
             try: pct = float(pct)
             except ValueError: continue
-        # 涨停阈值：主板 9.9%，科创板/创业板 19.9%
         code = diff.get("f12", "")
-        threshold = 19.9 if code.startswith(("30", "68")) else 9.9
+        
+        # 涨停阈值：主板 9.9%，科创板/创业板 19.8%（取20%的-0.2%避免边界问题）
+        if code.startswith(("30", "68")):
+            threshold = 19.8
+        else:
+            threshold = 9.9
+            
         if pct < threshold:
             continue
+            
         # 日期：使用最新K线日期而非 f26（f26 可能是上市日期）
         raw_date = str(diff.get("f26", ""))
         date_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}" if len(raw_date) == 8 else ""
@@ -82,13 +88,30 @@ def get_limit_up_list(date: Optional[str] = None) -> list[dict]:
         if date_str and date_str < "2026-01-01":
             date_str = ""
 
+        # 封板时间处理
+        board_time = diff.get("f186")
+        if isinstance(board_time, int):
+            board_time = f"{board_time:04d}"
+        elif board_time is not None:
+            board_time = str(board_time)
+            
+        # 连板数
+        consecutive = diff.get("f184", 1)
+        if isinstance(consecutive, str):
+            try:
+                consecutive = int(consecutive)
+            except ValueError:
+                consecutive = 1
+        elif consecutive is None:
+            consecutive = 1
+
         results.append({
             "code": code,
             "name": diff.get("f14", ""),
             "pct": pct,
             "date": date_str,
-            "board_time": None,
-            "consecutive": 1,
+            "board_time": board_time,
+            "consecutive": consecutive,
             "industry_name": ind_name,
             "industry_code": _INDUSTRY_NAME_TO_CODE.get(ind_name, ""),
             "turnover": diff.get("f8", 0) or 0,
