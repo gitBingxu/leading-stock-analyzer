@@ -66,15 +66,17 @@ def calc_anti_drop_score(
     avg_score = sum(d["total"] for d in daily_scores) / len(daily_scores)
 
     # 连跌奖励
-    consecutive_drops = _count_consecutive_drops(drop_days)
+    cons_info = _count_consecutive_drops(drop_days)
+    consecutive_drops = cons_info["length"]
+    conse_start = cons_info["start"]
     if consecutive_drops >= 2:
-        # 统计连跌期间表现
-        first_idx = stock_kline.index(drop_days[0]["stock_kline"])
-        period_stock = (stock_kline[first_idx + consecutive_drops - 1]["close"] 
-                        / stock_kline[first_idx - 1]["close"] - 1) * 100
-        period_market = sum(d["market_pct"] for d in drop_days[:consecutive_drops])
-        if period_stock > period_market * 0.5:
-            avg_score = min(avg_score + 10, 100)
+        first_idx = stock_kline.index(drop_days[conse_start]["stock_kline"])
+        if first_idx > 0:
+            period_stock = (stock_kline[first_idx + consecutive_drops - 1]["close"]
+                            / stock_kline[first_idx - 1]["close"] - 1) * 100
+            period_market = sum(d["market_pct"] for d in drop_days[conse_start:conse_start + consecutive_drops])
+            if period_stock > period_market * 0.5:
+                avg_score = min(avg_score + 10, 100)
 
     return {
         "score": round(avg_score, 1),
@@ -115,7 +117,10 @@ def _score_drop_day(
         rel_score = 0
 
     # B. 日内承接强度 (0.30)
-    o, h, l, c = stock_day["open"], stock_day["high"], stock_day["low"], stock_day["close"]
+    try:
+        o, h, l, c = stock_day["open"], stock_day["high"], stock_day["low"], stock_day["close"]
+    except KeyError:
+        return {"rel_score": 0, "support_score": 50, "rebound_score": 0, "total": 50}
     if h > l:
         lower_shadow_pct = (min(o, c) - l) / (h - l)
     else:
@@ -136,10 +141,7 @@ def _score_drop_day(
     # C. 企稳反弹弹性 (0.30)
     if stock_t1 and market_t1:
         t1_stock = (stock_t1["close"] / stock_day["close"] - 1) * 100
-        t1_market = (market_t1["close"] / stock_t1.get("pre_close", stock_day["close"]) - 1) * 100
 
-        # 使用 market_kline 中的 pct（但 market_t1.pct = t1.close / t1.pre_close，这个 pre_close 是 market_t1 的前一天收盘价）
-        # 这里简化：用 t1 相对于跳水日收盘的变化
         t1_market_pct = market_t1["pct"]  # t1 日涨跌幅
         t1_stock_pct = stock_t1["pct"]
         alpha = t1_stock_pct - t1_market_pct
@@ -165,14 +167,15 @@ def _score_drop_day(
     }
 
 
-def _count_consecutive_drops(drop_days: list[dict]) -> int:
-    """统计最长连续跳水天数。"""
+def _count_consecutive_drops(drop_days: list[dict]) -> dict:
+    """统计最长连续跳水天数，返回 {"length": N, "start": index_in_drop_days}."""
     if not drop_days:
-        return 0
-    max_cons = 1
-    current = 1
+        return {"length": 0, "start": 0}
+    max_len = 1
+    max_start = 0
+    current_len = 1
+    current_start = 0
     for i in range(1, len(drop_days)):
-        # 简单判断：相邻日期差 1-2 天（考虑周末）
         d1 = drop_days[i - 1]["date"]
         d2 = drop_days[i]["date"]
         try:
@@ -181,10 +184,14 @@ def _count_consecutive_drops(drop_days: list[dict]) -> int:
             dt2 = datetime.strptime(d2, "%Y-%m-%d")
             diff = (dt2 - dt1).days
             if diff <= 2:
-                current += 1
+                current_len += 1
             else:
-                current = 1
+                current_len = 1
+                current_start = i
         except ValueError:
-            current = 1
-        max_cons = max(max_cons, current)
-    return max_cons
+            current_len = 1
+            current_start = i
+        if current_len > max_len:
+            max_len = current_len
+            max_start = current_start
+    return {"length": max_len, "start": max_start}

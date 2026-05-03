@@ -104,18 +104,32 @@ def analyze_stock(code: str, verbose: bool = False) -> dict:
     limit_dates = [ld.get("date", "") for ld in recent_limit_ups]
     leading_result = calc_leading_score(stock_kline, industry_components, limit_dates)
 
-    # ── 维度四：资金承接性（轻量模式：只加载目标板块）──
+    # ── 维度四：资金承接性 ──
     print("  💰 分析资金承接性...", file=sys.stderr)
     absorption_result = {"score": 50, "breakdown": {"note": "无行业数据"}}
     if industry_code:
         try:
             from eastmoney_api import get_sector_5min_kline
-            target_sector = get_sector_5min_kline(industry_code)
-            if target_sector and len(target_sector) >= 40:
-                # 只传目标板块（轻量模式），多板块对比需 --deep 模式
-                absorption_result = calc_absorption_score(
-                    industry_code, {industry_code: target_sector}
-                )
+            # 加载目标板块 + 涨停榜中其他活跃板块用于跨板块对比
+            all_sectors = {}
+            target_kline = get_sector_5min_kline(industry_code)
+            if target_kline and len(target_kline) >= 40:
+                all_sectors[industry_code] = target_kline
+            # 补充涨停榜中频率最高的 6 个板块
+            ind_count = {}
+            for lu in limit_up_list:
+                ic = lu.get("industry_code", "")
+                if ic and ic != industry_code and ic not in all_sectors:
+                    ind_count[ic] = ind_count.get(ic, 0) + 1
+            for ic in sorted(ind_count, key=ind_count.get, reverse=True)[:6]:
+                try:
+                    kl = get_sector_5min_kline(ic)
+                    if kl and len(kl) >= 40:
+                        all_sectors[ic] = kl
+                except Exception:
+                    continue
+            if industry_code in all_sectors:
+                absorption_result = calc_absorption_score(industry_code, all_sectors)
         except Exception as e:
             absorption_result = {"score": 50, "breakdown": {"error": str(e)}}
 

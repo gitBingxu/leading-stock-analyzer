@@ -28,6 +28,7 @@ from eastmoney_api import (
     infer_consecutive_boards,
     get_market_index_kline,
     get_stock_quote,
+    get_sector_5min_kline,
 )
 from drive_analysis import calc_drive_score
 from anti_drop import calc_anti_drop_score
@@ -38,13 +39,12 @@ from absorption import calc_absorption_score
 # ─── Step 1: 获取并过滤涨停榜 ─────────────────────────
 
 def fetch_and_filter():
-    """拉取涨停榜，过滤：主板 + 非ST"""
+    """拉取涨停榜，过滤：主板 + 非ST。返回 (filtered_list, all_limit_up_list)。"""
     lu = get_limit_up_list()
     filtered = []
     for s in lu:
         code = s["code"]
         name = s["name"]
-        pct = s["pct"]
 
         # 主板：非 30/68 开头（排除创业板、科创板）
         if code.startswith(("30", "68")):
@@ -57,18 +57,21 @@ def fetch_and_filter():
         filtered.append(s)
 
     print(f"📡 涨停榜: {len(lu)} 只 → 主板非ST: {len(filtered)} 只", file=sys.stderr)
-    return filtered
+    return filtered, lu
 
 
 # ─── Step 2: 推算连板、过滤 >2 板、排序 ──────────────────
 
 def rank_by_consecutive(stocks: list[dict]) -> list[dict]:
-    """推算连板数，剔除超过 2 板的（不好介入），按连板降序排列。"""
+    """推算连板数，剔除超过 2 板的（不好介入），按连板降序排列。
+    同时缓存 K 线数据供后续分析复用。"""
     for s in stocks:
         try:
-            kl = get_stock_kline(s["code"], 10)
+            kl = get_stock_kline(s["code"], 20)
+            s["_cached_kline"] = kl
             s["est_cons"] = infer_consecutive_boards(s["code"], kl) if kl else 1
         except Exception:
+            s["_cached_kline"] = []
             s["est_cons"] = 1
 
     # 剔除连板 > 2
@@ -82,8 +85,29 @@ def rank_by_consecutive(stocks: list[dict]) -> list[dict]:
 
 # ─── Step 3 & 4: 批量四维分析 ───────────────────────────
 
-def batch_analyze(candidates: list[dict], market_kline: list[dict]) -> list[dict]:
+def batch_analyze(candidates: list[dict], market_kline: list[dict],
+                  all_lu: list[dict]) -> list[dict]:
     """对候选股逐个做四维分析，返回结果列表。"""
+    # 预加载板块5分钟K线（从涨停榜中收集活跃板块，用于资金承接性跨板块对比）
+    sector_klines = {}
+    target_codes = {s.get("industry_code", "") for s in candidates if s.get("industry_code")}
+    # 从涨停榜中额外补充 8 个最活跃板块
+    ind_count = {}
+    for lu in all_lu:
+        ic = lu.get("industry_code", "")
+        if ic and ic not in target_codes:
+            ind_count[ic] = ind_count.get(ic, 0) + 1
+    extra_codes = sorted(ind_count, key=ind_count.get, reverse=True)[:8]
+    all_sector_codes = list(target_codes) + extra_codes
+    for sc in all_sector_codes[:15]:
+        try:
+            kl = get_sector_5min_kline(sc)
+            if kl and len(kl) >= 40:
+                sector_klines[sc] = kl
+            time.sleep(0.1)
+        except Exception:
+            continue
+
     results = []
     total = len(candidates)
 
@@ -97,7 +121,7 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict]) -> list[dict
               file=sys.stderr)
 
         try:
-            result = _analyze_single(stock, market_kline)
+            result = _analyze_single(stock, market_kline, all_lu, sector_klines)
             results.append(result)
         except Exception as e:
             print(f"    ⚠️ 分析失败: {e}", file=sys.stderr)
@@ -121,25 +145,26 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict]) -> list[dict
     return results
 
 
-def _analyze_single(stock: dict, market_kline: list[dict]) -> dict:
+def _analyze_single(stock: dict, market_kline: list[dict],
+                    all_lu: list[dict], sector_klines: dict[str, list[dict]]) -> dict:
     """对单只股票执行完整四维分析。"""
     code = stock["code"]
     name = stock["name"]
     ind_name = stock.get("industry_name", "")
     ind_code = stock.get("industry_code", "")
 
-    # 数据
-    try:
-        stock_kline = get_stock_kline(code, 20)
-    except Exception:
-        stock_kline = []
-    
+    stock_kline = stock.get("_cached_kline", [])
+    if not stock_kline:
+        try:
+            stock_kline = get_stock_kline(code, 20)
+        except Exception:
+            stock_kline = []
+
     try:
         quote = get_stock_quote(code)
     except Exception:
         quote = {"price": 0, "pct": 0}
 
-    # 构造近 3 个涨停日数据
     latest_date = stock_kline[-1]["date"] if (stock_kline and len(stock_kline) > 0) else ""
     stock["date"] = stock.get("date") or latest_date
     stock["consecutive"] = stock.get("est_cons", 1)
@@ -156,9 +181,7 @@ def _analyze_single(stock: dict, market_kline: list[dict]) -> dict:
         except Exception:
             industry_components = []
 
-        # 同行业其他涨停股
         try:
-            all_lu = get_limit_up_list()
             co_list = [
                 lu for lu in all_lu
                 if lu.get("industry_name") == ind_name
@@ -189,13 +212,11 @@ def _analyze_single(stock: dict, market_kline: list[dict]) -> dict:
         leading_result = {"score": 50, "breakdown": {"error": str(e)}}
 
     # ── 资金承接性 ──
-    absorption_result = {"score": 50, "breakdown": {"note": "轻量模式"}}
-    if ind_code:
+    absorption_result = {"score": 50, "breakdown": {"note": "无板块数据"}}
+    if ind_code and ind_code in sector_klines:
         try:
-            from eastmoney_api import get_sector_5min_kline
-            target = get_sector_5min_kline(ind_code)
-            if target and len(target) >= 40:
-                absorption_result = calc_absorption_score(ind_code, {ind_code: target})
+            # 跨板块对比：目标板块 + 其他活跃板块
+            absorption_result = calc_absorption_score(ind_code, sector_klines)
         except Exception as e:
             absorption_result = {"score": 50, "breakdown": {"error": str(e)}}
 
@@ -359,7 +380,7 @@ def main():
 
     # Step 1: 拉涨停榜 + 过滤
     print("🔍 拉取涨停榜...", file=sys.stderr)
-    stocks = fetch_and_filter()
+    stocks, all_lu = fetch_and_filter()
 
     if not stocks:
         print("⚠️ 无符合条件的涨停股", file=sys.stderr)
@@ -380,7 +401,7 @@ def main():
 
     # Step 4: 批量四维分析
     print(f"🐉 四维分析 ({len(candidates)} 只)...", file=sys.stderr)
-    analyzed = batch_analyze(candidates, market_kline)
+    analyzed = batch_analyze(candidates, market_kline, all_lu)
 
     # Step 5: 取前 N
     top_n = analyzed[:args.top]

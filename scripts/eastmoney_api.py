@@ -56,7 +56,7 @@ def get_limit_up_list(date: Optional[str] = None) -> list[dict]:
         "pn": "1", "pz": "200", "po": "1", "np": "1",
         "fltt": "2", "invt": "2", "fid": "f3",
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-        "fields": "f12,f14,f3,f8,f6,f100,f102,f26,f184,f186",
+        "fields": "f12,f14,f3,f8,f6,f100,f26,f184,f186",
     }
     qs = urllib.parse.urlencode(params)
     _load_industry_map()
@@ -85,7 +85,7 @@ def get_limit_up_list(date: Optional[str] = None) -> list[dict]:
         ind_name = diff.get("f100", "") or ""
 
         # 忽略明显是历史日期（上市日期）的条目，使用当前交易日
-        if date_str and date_str < "2026-01-01":
+        if date_str and date_str < datetime.now().strftime("%Y-%m-%d"):
             date_str = ""
 
         # 封板时间处理
@@ -168,9 +168,9 @@ def _load_industry_map():
                     name = item.get("f14", "")
                     if code and name:
                         _INDUSTRY_NAME_TO_CODE[name] = code
-        _INDUSTRY_MAP_LOADED = True
     except Exception:
         pass
+    _INDUSTRY_MAP_LOADED = True
 
 
 def _industry_name_to_code(name: str) -> str:
@@ -191,6 +191,8 @@ def get_industry_components(industry_code_or_name: str) -> list[dict]:
     if not industry_code_or_name.startswith("BK"):
         code = _industry_name_to_code(industry_code_or_name)
         if not code:
+            import sys
+            print(f"⚠️ 行业名 '{industry_code_or_name}' 未找到对应BK编码，返回空", file=sys.stderr)
             return []
         industry_code_or_name = code
 
@@ -351,7 +353,7 @@ def get_stock_quote(code: str) -> dict:
     secid = f"{market}.{code}"
     params = {
         "secid": secid,
-        "fields": "f43,f44,f45,f46,f47,f48,f50,f57,f58,f60",
+        "fields": "f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f170",
     }
     qs = urllib.parse.urlencode(params)
     data = _fetch(f"{BASE_URL}/stock/get?{qs}")

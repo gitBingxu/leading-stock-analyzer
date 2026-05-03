@@ -117,7 +117,7 @@ def _calc_board_leadership(
 
     # 排序
     sorted_boards = sorted(all_boards, key=lambda x: x.get("board_time") or "9999")
-    rank = next(i + 1 for i, b in enumerate(sorted_boards) if b is limit_up)
+    rank = next((i + 1 for i, b in enumerate(sorted_boards) if b is limit_up), len(sorted_boards))
     total = len(sorted_boards)
 
     # ── C1 排名分 (0.25) ──
@@ -132,7 +132,7 @@ def _calc_board_leadership(
         early_bonus = 100
     elif mins <= MARKET_OPEN + 30:
         early_bonus = 100
-    elif mins <= 10 * 60:
+    elif mins <= 10 * 60 + 30:
         early_bonus = 70
     elif mins <= 11 * 60 + 30:
         early_bonus = 40
