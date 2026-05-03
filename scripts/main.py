@@ -63,8 +63,7 @@ def fetch_and_filter():
 # ─── Step 2: 推算连板、过滤 >2 板、排序 ──────────────────
 
 def rank_by_consecutive(stocks: list[dict]) -> list[dict]:
-    """推算连板数，剔除超过 2 板的（不好介入），按连板降序排列。
-    同时缓存 K 线数据供后续分析复用。"""
+    """推算连板数，按连板降序排列。同时缓存 K 线数据供后续分析复用。"""
     for s in stocks:
         try:
             kl = get_stock_kline(s["code"], 20)
@@ -73,11 +72,6 @@ def rank_by_consecutive(stocks: list[dict]) -> list[dict]:
         except Exception:
             s["_cached_kline"] = []
             s["est_cons"] = 1
-
-    # 剔除连板 > 2
-    before = len(stocks)
-    stocks = [s for s in stocks if s["est_cons"] <= 2]
-    print(f"  剔除 >2 连板: {before} → {len(stocks)} 只", file=sys.stderr)
 
     stocks.sort(key=lambda x: (x["est_cons"], x.get("pct", 0)), reverse=True)
     return stocks
@@ -371,8 +365,8 @@ def print_results(results: list[dict]):
 def main():
     parser = argparse.ArgumentParser(description="龙头战法批量筛选")
     parser.add_argument("--top", type=int, default=5, help="输出前 N 名（默认5）")
-    parser.add_argument("--candidates", type=int, default=15,
-                        help="分析候选数（默认15）")
+    parser.add_argument("--candidates", type=int, default=30,
+                        help="分析候选数（默认30）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     args = parser.parse_args()
 
