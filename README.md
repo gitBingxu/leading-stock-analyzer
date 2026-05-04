@@ -5,10 +5,12 @@
 ## 快速开始
 
 ```bash
-# 批量筛选（推荐）
-python3 scripts/main.py                     # 默认 top 5，候选 30
+# 批量筛选（推荐）：自动拉榜→排序→并行分析→Top N
+python3 scripts/main.py                     # 默认 top 5，候选 10，2 并发
 python3 scripts/main.py --top 10            # 输出前 10
+python3 scripts/main.py --candidates 20     # 更大候选池
 python3 scripts/main.py --top 5 --json      # JSON 格式（定时任务）
+python3 scripts/main.py --workers 1         # 串行（风控严格时使用）
 
 # 单票深度分析
 python3 scripts/analyze.py 002xxx           # 基础分析
@@ -34,12 +36,21 @@ python3 scripts/analyze.py 002xxx --json    # JSON 输出
 | 📊 中规中矩 | 50-69 | 还行但缺少亮点 |
 | 🐔 杂毛 | <50 | 跟风货，回避 |
 
-## 筛选流程
+## 架构
 
 ```
-拉取涨停榜 → 过滤主板+非ST → 推算连板数 → 取前30候选
-             → 四维分析（带动/抗跌/领涨/承接） → 按综合分排序 → 输出 Top N
+main.py (编排器)
+│  Step 0: 预加载涨停榜+大盘K线 → /tmp/lsa_YYYYMMDD.json（自动清理3天前）
+│  Step 1: 过滤主板+非ST
+│  Step 2: 推算连板 → 降序取前 N 候选
+│  Step 3: subprocess 并行调 analyze.py --shared-data（默认 2 并发）
+│  Step 4: 按综合分排序 → 输出 Top N
+│
+analyze.py (单票子进程)
+  复用共享数据免重复请求 → 四维分析（带动/抗跌/领涨/承接） → JSON
 ```
+
+`--workers N` 控制并行数：默认 2（防风控），风控严格时设为 1（纯串行）。单票失败不影响其他。
 
 ## 输出示例
 
@@ -48,23 +59,26 @@ python3 scripts/analyze.py 002xxx --json    # JSON 输出
   🐉 龙头战法批量筛选 — 最新交易日
 ======================================================================
 
-  🥇  融捷股份(002192)  能源金属  3连板 +10.0%
-     综合: 72.0  ⭐ 强票
-     带动性 100  抗跌性 32  领涨性 78  承接 50
-     📋 🐉 带动性: 板块共鸣91/跟风100/决策力75，板块共振强劲
-         🛡️ 抗跌性: 近2次跳水偏弱，警惕系统性风险
-         📊 领涨性: 行业排名前39%，跑赢中位数+2.0%
-         💰 资金承接: 暂无显著跨板块虹吸信号
+融捷股份(002192)——能源金属——3连板
+    1. 综合评分: 72.0，强票
+    - 🐉 带动性(100): 板块共鸣91/跟风100/决策力75，板块共振强劲
+    - 🛡️ 抗跌性(32): 近2次跳水偏弱，警惕系统性风险
+    - 📊 领涨性(78): 行业排名前39%，跑赢中位数+2.0%
+    - 💰 资金承接(50): 暂无显著跨板块虹吸信号
+    2. 买点建议：
+    - xxx 后续迭代
 ```
 
 ## 数据来源
 
-全部来自东方财富公开 JSONP 接口（免费，无需登录）：
+全部来自公开接口（免费，无需登录）：
 
-- 涨停榜、行业成分股 — `push2.eastmoney.com/api/qt/clist/get`
-- 个股实时行情 — `push2.eastmoney.com/api/qt/stock/get`
-- 日K线 / 5分钟K线 — `push2his.eastmoney.com/api/qt/stock/kline/get`
-- 备用 K 线 — 腾讯财经 API
+| 数据 | 主源 | 备用 |
+|------|------|------|
+| 涨停榜、行业成分股 | 东方财富 `push2.eastmoney.com` | — |
+| 个股 / 指数日K线 | 腾讯 `web.ifzq.gtimg.cn` | 东方财富 `push2his.eastmoney.com` |
+| 5 分钟 K 线 | 东方财富 `push2his.eastmoney.com` | — |
+| 个股实时行情 | 东方财富 `push2.eastmoney.com` | 腾讯 `qt.gtimg.cn` |
 
 详见 `references/api_reference.md`。
 
@@ -72,19 +86,23 @@ python3 scripts/analyze.py 002xxx --json    # JSON 输出
 
 ```
 scripts/
-├── main.py              # 批量筛选入口
+├── main.py              # 批量筛选入口（subprocess 并行编排）
+├── preload.py           # 共享数据预加载（可独立使用）
 ├── analyze.py           # 单票深度分析
 ├── eastmoney_api.py     # 东方财富 + 腾讯 API 封装
 ├── drive_analysis.py    # 带动性分析
 ├── anti_drop.py         # 抗跌性分析
 ├── leadership.py        # 领涨性分析
-└── absorption.py        # 资金承接性分析
+├── absorption.py        # 资金承接性分析
+└── log_builder.py       # 四维日志生成
 references/
 └── api_reference.md     # API 字段说明
+SKILL.md                 # AI agent 集成工作流
 ```
 
 ## 注意事项
 
-- API 为公开接口，不承诺 SLA，高峰期可能超时（代码内置了重试和限速）
+- API 为公开接口，不承诺 SLA，高峰期可能超时（内置 3 次重试 + 双源备用 + 限速）
 - 板块 5 分钟 K 线仅在交易时段可用，非交易日资金承接性维度退化为默认分
-- 深圳创业板/科创板已自动过滤，关注主板涨停
+- 深圳创业板 / 科创板已自动过滤，关注主板涨停
+- AI agent 集成详见 `SKILL.md`
