@@ -129,7 +129,7 @@ def infer_consecutive_boards(code: str, kline: list[dict]) -> int:
     cons = 1
     threshold = 19.9 if code.startswith(("30", "68")) else 9.5
     # 从最近一天往回数
-    for i in range(len(kline) - 1, 0, -1):
+    for i in range(len(kline) - 2, 0, -1):
         if kline[i]["pct"] >= threshold:
             cons += 1
         else:
