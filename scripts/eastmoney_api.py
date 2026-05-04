@@ -39,7 +39,7 @@ def _fetch(url: str, max_retries: int = 3) -> dict:
             last_err = e
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (attempt + 1))
-    raise last_err
+    raise RuntimeError(f"{type(last_err).__name__}: {last_err}") from last_err
 
 
 # ─── 涨停榜 ────────────────────────────────────────────
@@ -67,7 +67,9 @@ def get_limit_up_list(date: Optional[str] = None) -> list[dict]:
         pct = diff.get("f3", 0)
         if isinstance(pct, str):
             try: pct = float(pct)
-            except ValueError: continue
+            except ValueError:
+                print(f"⚠️ 涨停榜涨幅解析失败 code={diff.get('f12','?')} raw={pct!r}", file=sys.stderr)
+                continue
         code = diff.get("f12", "")
         
         # 涨停阈值：主板 9.9%，科创板/创业板 19.8%（取20%的-0.2%避免边界问题）
@@ -185,8 +187,8 @@ def _load_industry_map():
                     if code and name:
                         _INDUSTRY_NAME_TO_CODE[name] = code
                         _INDUSTRY_CODE_TO_NAME[code] = name
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ 行业映射加载失败 ({type(e).__name__}): {e}", file=sys.stderr)
     _INDUSTRY_MAP_LOADED = True
 
 
@@ -226,8 +228,8 @@ def _load_concept_map():
                     name = item.get("f14", "")
                     if code and name and name not in _TECH_BOARD_NAMES:
                         _CONCEPT_CODE_TO_NAME[code] = name
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ 概念映射加载失败 ({type(e).__name__}): {e}", file=sys.stderr)
     _CONCEPT_MAP_LOADED = True
 
 
@@ -287,12 +289,12 @@ def get_stock_concept_map(limit_up_list: list[dict],
             time.sleep(0.1)
             up_in_concept = [c for c in constituents if c.get("code", "") in lu_codes]
             up_count = len(up_in_concept)
-            # 记录所有属于该概念的候选/涨停票（不限于 ≥2）
             for c in constituents:
                 sc = c.get("code", "")
                 if sc in all_codes:
                     stock_concepts.setdefault(sc, []).append((cn, cc, up_count))
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠️ 概念 '{cn}' 成分股获取失败 ({type(e).__name__})", file=sys.stderr)
             continue
 
     # 每只票取涨停股最多的概念（若无涨停概念则取任意匹配的）
@@ -476,30 +478,78 @@ def _get_kline_eastmoney(code: str, days: int = 20) -> list[dict]:
 
 def get_stock_quote(code: str) -> dict:
     """
-    获取个股实时行情。
+    获取个股实时行情（优先东方财富，失败回退腾讯）。
     返回: {"code":"600519","name":"贵州茅台","price":1400,"pct":1.5,
            "open":1380,"high":1405,"low":1375,"volume":50000,"amount":7e9}
     """
-    market = _get_market(code)
-    secid = f"{market}.{code}"
-    params = {
-        "secid": secid,
-        "fields": "f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f170",
-    }
-    qs = urllib.parse.urlencode(params)
-    data = _fetch(f"{BASE_URL}/stock/get?{qs}")
-    d = data.get("data", {})
-    return {
-        "code": d.get("f57", code),
-        "name": _clean_name(d.get("f58", "")),
-        "price": d.get("f43", 0) / 100 if d.get("f43") else 0,
-        "pct": d.get("f170", 0) / 100 if d.get("f170") else 0,
-        "open": d.get("f44", 0) / 100 if d.get("f44") else 0,
-        "high": d.get("f45", 0) / 100 if d.get("f45") else 0,
-        "low": d.get("f46", 0) / 100 if d.get("f46") else 0,
-        "volume": d.get("f47", 0),
-        "amount": d.get("f48", 0),
-    }
+    # 主源：东方财富
+    try:
+        market = _get_market(code)
+        secid = f"{market}.{code}"
+        params = {
+            "secid": secid,
+            "fields": "f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f170",
+        }
+        qs = urllib.parse.urlencode(params)
+        data = _fetch(f"{BASE_URL}/stock/get?{qs}")
+        d = data.get("data", {})
+        return {
+            "code": d.get("f57", code),
+            "name": _clean_name(d.get("f58", "")),
+            "price": d.get("f43", 0) / 100 if d.get("f43") else 0,
+            "pct": d.get("f170", 0) / 100 if d.get("f170") else 0,
+            "open": d.get("f44", 0) / 100 if d.get("f44") else 0,
+            "high": d.get("f45", 0) / 100 if d.get("f45") else 0,
+            "low": d.get("f46", 0) / 100 if d.get("f46") else 0,
+            "volume": d.get("f47", 0),
+            "amount": d.get("f48", 0),
+        }
+    except Exception as e:
+        print(f"  ⚠️ 东方财富行情失败 ({type(e).__name__})，尝试腾讯备用", file=sys.stderr)
+
+    # 备用：腾讯财经
+    return _get_quote_tencent(code)
+
+
+def _get_quote_tencent(code: str) -> dict:
+    """腾讯财经实时行情（备用源）。"""
+    prefix = "sh" if code.startswith(("6", "9")) else "sz"
+    url = f"http://qt.gtimg.cn/q={prefix}{code}"
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://gu.qq.com/",
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("gbk")
+            # 格式: v_sz000790="1~华神科技~000790~4.57~4.55~4.15~4.58~..."
+            if '="' not in raw:
+                continue
+            body = raw.split('="', 1)[1].rstrip('";\n')
+            parts = body.split("~")
+            if len(parts) < 38:
+                continue
+            price = float(parts[3]) if parts[3] else 0
+            prev_close = float(parts[4]) if parts[4] else 0
+            return {
+                "code": code,
+                "name": parts[1],
+                "price": price,
+                "pct": round((price - prev_close) / prev_close * 100, 2) if prev_close else 0,
+                "open": float(parts[5]) if parts[5] else 0,
+                "high": float(parts[33]) if len(parts) > 33 and parts[33] else 0,
+                "low": float(parts[34]) if len(parts) > 34 and parts[34] else 0,
+                "volume": float(parts[6]) if parts[6] else 0,
+                "amount": float(parts[37]) * 10000 if len(parts) > 37 and parts[37] else 0,
+            }
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                print(f"  ⚠️ 腾讯行情也失败，返回默认值", file=sys.stderr)
+                return {"code": code, "name": "", "price": 0, "pct": 0,
+                        "open": 0, "high": 0, "low": 0, "volume": 0, "amount": 0}
 
 
 # ─── 板块指数 5 分钟 K 线 ────────────────────────────────
@@ -617,7 +667,8 @@ def get_all_active_sector_5min() -> dict[str, list[dict]]:
             if kline:
                 result[code] = kline
             time.sleep(0.05)  # 限速
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠️ 板块 {code} 5分钟K线获取失败 ({type(e).__name__})", file=sys.stderr)
             continue
     return result
 

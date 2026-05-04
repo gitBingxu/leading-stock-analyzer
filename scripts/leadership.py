@@ -10,6 +10,7 @@ def calc_leading_score(
     stock_kline: list[dict],
     industry_components: list[dict],
     limit_up_dates: list[str],
+    code: str = "",
 ) -> dict:
     """
     计算领涨性综合得分。
@@ -18,32 +19,27 @@ def calc_leading_score(
         stock_kline: 个股近 15 个交易日日K线
         industry_components: 某日行业成分股行情（取最近一个交易日）
         limit_up_dates: 涨停日期列表
+        code: 股票代码，用于在成分股列表中定位真实排名
 
     返回:
         {"score": 72, "breakdown": {"avg_pct_rank": 0.28, "deviation_bonus": 5}}
     """
     if not industry_components:
-        return {"score": 50, "breakdown": {"error": "无行业数据"}}
+        return {"score": 50, "breakdown": {"error": "无行业数据"}, "fallback": True}
 
     # Step 1: 单日真实排名（基于当日成分股行情）
     sorted_comp = sorted(industry_components, key=lambda x: x.get("pct", 0), reverse=True)
     total = len(sorted_comp)
-    
-    # 从 stock_kline 获取股票代码
-    stock_code = None
-    if stock_kline:
-        stock_code = stock_kline[-1].get("code", "") if "code" in stock_kline[-1] else None
 
     # 找到个股在行业中的真实排名
     rank = None
-    if stock_code:
+    if code:
         for i, s in enumerate(sorted_comp):
-            if s["code"] == stock_code:
+            if s["code"] == code:
                 rank = i + 1
                 break
-    
+
     if rank is None:
-        # 如果找不到代码，尝试通过涨幅中位数估算
         rank = total // 2
 
     pct_rank = rank / total

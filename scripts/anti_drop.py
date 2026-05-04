@@ -45,18 +45,24 @@ def calc_anti_drop_score(
     # Step 2: 对每个跳水日打分
     daily_scores = []
     for i, dd in enumerate(drop_days):
-        # 反弹：取次日（或后日）数据
-        next_idx = stock_kline.index(dd["stock_kline"]) + 1
-        has_t1 = next_idx < len(stock_kline) and next_idx < len(market_kline)
+        # 反弹：取次日（或后日）数据 — 用日期查找替代列表引用
+        cur_idx = next((j for j, k in enumerate(stock_kline) if k["date"] == dd["date"]), -1)
+        next_idx = cur_idx + 1
+        has_t1 = (cur_idx >= 0 and next_idx < len(stock_kline)
+                  and next_idx < len(market_kline))
+
+        # 前一日收盘价
+        if cur_idx > 0:
+            prev_close = stock_kline[cur_idx - 1]["close"]
+        else:
+            prev_close = dd["stock_kline"]["open"]
 
         daily = _score_drop_day(
             stock_day=dd["stock_kline"],
             market_pct=dd["market_pct"],
             stock_t1=stock_kline[next_idx] if has_t1 else None,
             market_t1=market_kline[next_idx] if has_t1 else None,
-            prev_close=stock_kline[stock_kline.index(dd["stock_kline"]) - 1]["close"]
-            if stock_kline.index(dd["stock_kline"]) > 0
-            else dd["stock_kline"]["open"],
+            prev_close=prev_close,
         )
         daily["date"] = dd["date"]
         daily["market_pct"] = round(dd["market_pct"], 2)
@@ -70,7 +76,8 @@ def calc_anti_drop_score(
     consecutive_drops = cons_info["length"]
     conse_start = cons_info["start"]
     if consecutive_drops >= 2:
-        first_idx = stock_kline.index(drop_days[conse_start]["stock_kline"])
+        first_date = drop_days[conse_start]["date"]
+        first_idx = next((j for j, k in enumerate(stock_kline) if k["date"] == first_date), -1)
         if first_idx > 0:
             period_stock = (stock_kline[first_idx + consecutive_drops - 1]["close"]
                             / stock_kline[first_idx - 1]["close"] - 1) * 100

@@ -267,7 +267,7 @@ def _analyze_single(stock: dict, market_kline: list[dict],
     
     limit_dates = [stock.get("date", "")]
     try:
-        leading_result = calc_leading_score(stock_kline, industry_components, limit_dates)
+        leading_result = calc_leading_score(stock_kline, industry_components, limit_dates, code)
     except Exception as e:
         leading_result = {"score": 50, "breakdown": {"error": str(e)}}
 

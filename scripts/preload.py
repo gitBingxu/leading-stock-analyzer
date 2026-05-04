@@ -28,9 +28,23 @@ def main():
     cleanup()
 
     print("📡 拉取涨停榜...", file=sys.stderr)
-    limit_up_list = get_limit_up_list()
+    try:
+        limit_up_list = get_limit_up_list()
+    except Exception as e:
+        print(f"❌ 涨停榜获取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+        print("ERROR: limit_up_list_failed", file=sys.stderr)
+        sys.exit(1)
+
     print("📈 拉取大盘K线...", file=sys.stderr)
-    market_kline = get_market_index_kline("1.000001", 20)
+    try:
+        market_kline = get_market_index_kline("1.000001", 20)
+    except Exception as e:
+        print(f"❌ 大盘K线获取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+        print("ERROR: market_kline_failed", file=sys.stderr)
+        sys.exit(1)
+
+    if not limit_up_list:
+        print("⚠️ 涨停榜为空（可能非交易日），仍生成共享文件", file=sys.stderr)
 
     trading_date = datetime.now().strftime("%Y%m%d")
     if limit_up_list:

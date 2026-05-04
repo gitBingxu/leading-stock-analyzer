@@ -56,8 +56,12 @@ def _load_shared_data(filepath, max_age_minutes=10):
         return None, None
 
     today = datetime.now().strftime("%Y%m%d")
-    if data.get("trading_date", "") != today:
-        print(f"  ⚠️ 共享数据日期 ≠ 今天，自行拉取", file=sys.stderr)
+    td = data.get("trading_date", "")
+    if td != today:
+        if td > today:
+            print(f"  ⚠️ 共享数据日期({td})在未来，自行拉取", file=sys.stderr)
+        else:
+            print(f"  ⚠️ 共享数据日期({td})≠今天，自行拉取", file=sys.stderr)
         return None, None
 
     print(f"  ✅ 复用共享数据 ({os.path.basename(filepath)})", file=sys.stderr)
@@ -70,20 +74,38 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
     print(f"🔍 正在分析 {code}...", file=sys.stderr)
 
     # ── 数据采集 ──
+    _errors = []
     limit_up_list, market_kline = _load_shared_data(shared_data_file)
     if limit_up_list is None:
-        print("  📡 获取涨停榜...", file=sys.stderr)
-        limit_up_list = get_limit_up_list()
+        try:
+            print("  📡 获取涨停榜...", file=sys.stderr)
+            limit_up_list = get_limit_up_list()
+        except Exception as e:
+            print(f"  ❌ 涨停榜获取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+            _errors.append(("涨停榜", f"{type(e).__name__}: {e}"))
+            limit_up_list = []
 
-    print("  📊 获取个股K线...", file=sys.stderr)
-    stock_kline = get_stock_kline(code, days=20)
+    try:
+        print("  📊 获取个股K线...", file=sys.stderr)
+        stock_kline = get_stock_kline(code, days=20)
+    except Exception as e:
+        print(f"  ❌ 个股K线获取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+        _errors.append(("个股K线", f"{type(e).__name__}: {e}"))
+        stock_kline = []
 
     if market_kline is None:
-        print("  📈 获取大盘指数K线...", file=sys.stderr)
-        market_kline = get_market_index_kline("1.000001", days=20)
+        try:
+            print("  📈 获取大盘指数K线...", file=sys.stderr)
+            market_kline = get_market_index_kline("1.000001", days=20)
+        except Exception as e:
+            print(f"  ❌ 大盘K线获取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+            _errors.append(("大盘K线", f"{type(e).__name__}: {e}"))
+            market_kline = []
 
     print("  🏷️  获取实时行情...", file=sys.stderr)
     quote = get_stock_quote(code)
+    if quote.get("price", 0) == 0 and quote.get("pct", 0) == 0 and not quote.get("name"):
+        _errors.append(("实时行情", "获取失败，返回默认值"))
 
     # 找到该股近 3 个涨停日，并推算连板数 + 补日期
     stock_limit_ups = [lu for lu in limit_up_list if lu["code"] == code]
@@ -114,7 +136,12 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
 
     if recent_limit_ups and industry_code:
         # 获取行业成分股
-        industry_components = get_industry_components(industry_code if industry_code else industry_name)
+        try:
+            industry_components = get_industry_components(industry_code if industry_code else industry_name)
+        except Exception as e:
+            print(f"  ⚠️ 行业成分股获取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+            _errors.append(("行业成分股", f"{type(e).__name__}: {e}"))
+            industry_components = []
 
         # 构建 co_limitup_map：同行业其他涨停股
         for ld in recent_limit_ups:
@@ -125,31 +152,45 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
             ]
             co_limitup_map[ld.get("date", "")] = co_list
 
-        drive_result = calc_drive_score(
-            code, recent_limit_ups, co_limitup_map, industry_components
-        )
+        try:
+            drive_result = calc_drive_score(
+                code, recent_limit_ups, co_limitup_map, industry_components
+            )
+        except Exception as e:
+            print(f"  ⚠️ 带动性分析失败 ({type(e).__name__}): {e}", file=sys.stderr)
+            _errors.append(("带动性", f"{type(e).__name__}: {e}"))
+            drive_result = {"score": 30, "breakdown": {"error": str(e)}, "fallback": True}
     else:
         industry_components = []
 
     # ── 维度二：抗跌性 ──
     print("  🛡️  分析抗跌性...", file=sys.stderr)
-    anti_drop_result = calc_anti_drop_score(stock_kline, market_kline)
+    try:
+        anti_drop_result = calc_anti_drop_score(stock_kline, market_kline)
+    except Exception as e:
+        print(f"  ⚠️ 抗跌性分析失败 ({type(e).__name__}): {e}", file=sys.stderr)
+        _errors.append(("抗跌性", f"{type(e).__name__}: {e}"))
+        anti_drop_result = {"score": 50, "drop_days_count": 0, "breakdown": {"error": str(e)}, "fallback": True}
 
     # ── 维度三：领涨性 ──
     print("  📊 分析领涨性...", file=sys.stderr)
     if not industry_components and industry_code:
-        industry_components = get_industry_components(industry_code)
+        try:
+            industry_components = get_industry_components(industry_code)
+        except Exception as e:
+            print(f"  ⚠️ 行业成分股获取失败 ({type(e).__name__}): {e}", file=sys.stderr)
+            _errors.append(("行业成分股", f"{type(e).__name__}: {e}"))
     limit_dates = [ld.get("date", "") for ld in recent_limit_ups]
-    leading_result = calc_leading_score(stock_kline, industry_components, limit_dates)
+    leading_result = calc_leading_score(stock_kline, industry_components, limit_dates, code)
 
     # ── 维度四：资金承接性 ──
     print("  💰 分析资金承接性...", file=sys.stderr)
     absorption_result = {"score": 50, "breakdown": {"note": "无行业数据"}}
+    all_sectors = {}
     if industry_code:
         try:
             from eastmoney_api import get_sector_5min_kline
             # 加载目标板块 + 涨停榜中其他活跃板块用于跨板块对比
-            all_sectors = {}
             target_kline = get_sector_5min_kline(industry_code)
             if target_kline and len(target_kline) >= 40:
                 all_sectors[industry_code] = target_kline
@@ -165,12 +206,15 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
                     time.sleep(0.1)
                     if kl and len(kl) >= 40:
                         all_sectors[ic] = kl
-                except Exception:
+                except Exception as e2:
+                    print(f"    ⚠️ 板块 {ic} 5分钟K线失败 ({type(e2).__name__})", file=sys.stderr)
                     continue
             if industry_code in all_sectors:
                 absorption_result = calc_absorption_score(industry_code, all_sectors)
         except Exception as e:
-            absorption_result = {"score": 50, "breakdown": {"error": str(e)}}
+            print(f"  ⚠️ 资金承接性分析失败 ({type(e).__name__}): {e}", file=sys.stderr)
+            _errors.append(("资金承接性", f"{type(e).__name__}: {e}"))
+            absorption_result = {"score": 50, "breakdown": {"error": str(e)}, "fallback": True}
 
     # ── 5分钟K线数据（用于详细日志）──
     stock_5min = []
@@ -196,10 +240,11 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
                             "code": cp["code"], "name": cp["name"],
                             "kline": cp_kl,
                         })
-                except Exception:
+                except Exception as e2:
+                    print(f"    ⚠️ 同伴 {cp.get('code','?')} 5分钟K线失败 ({type(e2).__name__})", file=sys.stderr)
                     continue
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠️ 5分钟K线加载失败 ({type(e).__name__}): {e}", file=sys.stderr)
 
     # ── 四维叙事日志 ──
     logs = {}
@@ -249,6 +294,8 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
         "leading": leading_result,
         "absorption": absorption_result,
         "logs": logs,
+        "_errors": _errors,
+        "_fallback": len(_errors) > 0,
     }
 
 
