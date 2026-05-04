@@ -15,20 +15,17 @@ description: >
 ## 快速使用
 
 ```bash
-# 批量筛选（推荐）：自动拉榜→排序→分析→Top N
-python3 scripts/main.py                     # 默认 top 5，候选 10
+# 批量筛选（推荐）：自动拉榜→排序→并行分析→Top N
+python3 scripts/main.py                     # 默认 top 5，候选 10，2并发
 python3 scripts/main.py --top 10            # 输出前 10
 python3 scripts/main.py --candidates 20     # 更大候选池
 python3 scripts/main.py --top 5 --json      # JSON 格式（供定时任务使用）
+python3 scripts/main.py --workers 1         # 串行（风控严格时使用）
 
 # 单票深度分析
 python3 scripts/analyze.py 002xxx           # 基础分析
 python3 scripts/analyze.py 002xxx -v        # 详细报告
 python3 scripts/analyze.py 002xxx --json    # JSON 输出
-
-# 复用预加载数据（agent 编排工作流，避免重复请求）
-python3 scripts/preload.py                                    # ① 生成共享数据，输出文件路径
-python3 scripts/analyze.py 002xxx --shared-data <路径> --json # ② 并行分析，自动校验时效
 ```
 
 ## 四个维度
@@ -61,44 +58,47 @@ python3 scripts/analyze.py 002xxx --shared-data <路径> --json # ② 并行分�
 
 ## Agent 批量筛选流程
 
-当用户请求批量龙头筛选时，按以下步骤编排：
+当用户请求批量龙头筛选时，**严格按以下步骤执行**：
 
-1. `python3 scripts/preload.py` → 获取共享数据文件路径（自动清理 3 天前旧文件）
-2. 读取共享数据 JSON，过滤主板 + 非ST 涨停股
-3. 推算每只连板数 → 连板降序取前 10 候选
-4. 并行运行 `python3 scripts/analyze.py <code> --shared-data <路径> --json`
-5. 按 `composite_score` 降序 → 输出 Top N（含四维详细日志）
+1. 执行命令（默认 2 并发，防风控）：
+   ```bash
+   python3 scripts/main.py --top 5
+   ```
 
-人工终端可直接用：
-```bash
-python3 scripts/main.py                     # 一键批量筛选（保留原版入口）
+2. 如遇风控限流或 API 错误，降级重试：
+   ```bash
+   python3 scripts/main.py --top 5 --workers 1
+   ```
+
+3. **严格按下方模板一字不差地输出终端结果。**
+
+禁止以下行为：
+- 总结成表格
+- 添加点评、分析、交易建议
+- emoji 前缀（如"根据分析..."、"该股..."）
+- 省略或截断四维日志任何一行
+- 加工或润色日志原文
+
+## 输出格式（严格模板）
+
+终端输出严格遵循以下模板。每只票完整复制模板，票之间空一行：
+
+```
+======================================================================
+  🐉 龙头战法批量筛选 — 最新交易日
+======================================================================
+
+<股票名>(<代码>)——<行业>——<N>连板
+    1. 综合评分: <分数>，<评级>
+    - 🐉 带动性(<分>): <日志原文>
+    - 🛡️ 抗跌性(<分>): <日志原文>
+    - 📊 领涨性(<分>): <日志原文>
+    - 💰 资金承接(<分>): <日志原文>
+    2. 买点建议：
+    - xxx 后续迭代
 ```
 
-## 输出说明
-
-**重要**: 运行脚本后，将终端输出的每一行完整呈现给用户。不要省略四维日志，不要总结成表格，不要添加额外点评。
-
-每次分析输出包含：
-- **综合评分 + 评级** — 加权四维得分
-- **四维选择理由** — 一句话总结每维表现
-- **四维详细日志** — 完整的分析过程描述（如带动性：封板时间、跟风票拉升时间线；抗跌性：逐日跳水表现；领涨性：行业排名位置；资金承接：跨板块虹吸事件详情）
-
-## 模块结构
-
-```
-scripts/
-├── main.py              # 批量筛选主流程（定时任务入口）
-├── preload.py           # 共享数据预加载 + 自动清理
-├── analyze.py           # 单票深度分析
-├── eastmoney_api.py     # 东方财富+腾讯 API 封装
-├── drive_analysis.py    # 带动性分析
-├── anti_drop.py         # 抗跌性分析
-├── leadership.py        # 领涨性分析
-├── absorption.py        # 资金承接性分析
-└── log_builder.py       # 四维日志生成
-```
-
-## 输出示例
+输出示例：
 
 ```
 ======================================================================
@@ -113,6 +113,21 @@ scripts/
     - 💰 资金承接(50): 暂无显著跨板块虹吸信号
     2. 买点建议：
     - xxx 后续迭代
+```
+
+## 模块结构
+
+```
+scripts/
+├── main.py              # 批量筛选主流程（subprocess并行编排）
+├── preload.py           # 共享数据预加载（可独立使用）
+├── analyze.py           # 单票深度分析
+├── eastmoney_api.py     # 东方财富+腾讯 API 封装
+├── drive_analysis.py    # 带动性分析
+├── anti_drop.py         # 抗跌性分析
+├── leadership.py        # 领涨性分析
+├── absorption.py        # 资金承接性分析
+└── log_builder.py       # 四维日志生成
 ```
 
 ## 注意事项
