@@ -171,16 +171,20 @@ def analyze_stock(code: str, verbose: bool = False) -> dict:
     except Exception:
         pass
 
-    # ── 四维详细日志 ──
+    # ── 四维叙事日志 ──
     logs = {}
+    date_str = recent_limit_ups[0].get("date", "") if recent_limit_ups else ""
+    bt = drive_result.get("best_day", {}).get("board_time", "")
+    name = quote.get("name", "")
     logs["drive"] = build_drive_logs(
-        code, quote.get("name", ""), drive_result,
-        stock_5min, companions, sector_5min
+        code, name, drive_result, stock_5min, companions, sector_5min,
+        industry_name, date_str
     )
     logs["anti_drop"] = build_anti_drop_logs(anti_drop_result)
     logs["leading"] = build_leadership_logs(leading_result)
     logs["absorption"] = build_absorption_logs(
-        absorption_result, _INDUSTRY_CODE_TO_NAME
+        absorption_result, _INDUSTRY_CODE_TO_NAME, stock_5min,
+        sector_5min, date_str, bt, name, industry_name
     )
 
     # ── 综合评分 ──
@@ -224,100 +228,33 @@ def print_report(result: dict, verbose: bool = False):
     print("=" * 60)
     print(f"  🐉 龙头战法量化分析 — {result['name']}({result['code']})")
     print("=" * 60)
-    print(f"  现价: {result['price']:.2f}  |  涨跌: {result['pct']:+.2f}%")
-    print(f"  行业: {result['industry']}")
-    print()
 
-    # 综合评分
     score = result["composite_score"]
-    bar = "█" * int(score / 5) + "░" * (20 - int(score / 5))
-    print(f"  📊 综合评分: {score:.1f} / 100  {bar}")
-    print(f"  🏅 评级:     {result['rating']}")
-    print()
-    print("  " + "-" * 56)
+    rating = result["rating"].replace("🐉 ", "").replace("⭐ ", "").replace("📊 ", "").replace("🐔 ", "")
+    cons = result.get("est_cons", 1)
 
-    # 各维度明细
-    dims = [
-        ("带动性",    result["drive"],      0.35),
-        ("抗跌性",    result["anti_drop"],   0.15),
-        ("领涨性",    result["leading"],     0.25),
-        ("资金承接",  result["absorption"],  0.25),
-    ]
-    for name, dim, w in dims:
-        s = dim["score"]
-        bar = "▓" * int(s / 5) + "░" * (20 - int(s / 5))
-        print(f"  {name:　<6s}  {s:5.1f} ×{w:.2f}  {bar}")
+    print(f"\n{result['name']}({result['code']})——{result['industry']}——{cons}连板")
+    print(f"    1. 综合评分: {score:.1f}，{rating}")
 
-    print()
-
-    # ── 四维选择理由 ──
-    print("  📋 四维选择理由:")
-    reasons = _build_reasons(result)
-    for label, text in reasons:
-        print(f"     {label}: {text}")
-
-    print()
-    if verbose:
-        print("=" * 60)
-        print("  详细分析")
-        print("=" * 60)
-
-        # 带动性详情
-        d = result["drive"]
-        print(f"\n── 带动性 (score={d['score']}) ──")
-        if "best_day" in d and d["best_day"]:
-            bd = d["best_day"]
-            print(f"  最佳日: {bd.get('date','')}  封板时间: {bd.get('board_time','一键')}")
-            bk = bd.get("breakdown", {})
-            print(f"    板块共鸣度: {bk.get('voice_score','')}")
-            print(f"    板块跟风力: {bk.get('follow_score','')}")
-            print(f"    封板决策力: {bk.get('board_leadership_score','')}")
-        elif "error" in d.get("breakdown", {}):
-            print(f"  ⚠️ {d['breakdown']['error']}")
-
-        # 抗跌性详情
-        ad = result["anti_drop"]
-        print(f"\n── 抗跌性 (score={ad['score']}) ──")
-        if ad.get("drop_days_count", 0) > 0:
-            print(f"  跳水日数: {ad['drop_days_count']}")
-            for date, bd in ad.get("breakdown", {}).items():
-                print(f"    {date}: 相对回撤={bd.get('rel_score')} 承接={bd.get('support_score')} 反弹={bd.get('rebound_score')} → {bd.get('total')}")
-        else:
-            print(f"  ℹ️ {ad.get('details', '无跳水日')}")
-
-        # 领涨性详情
-        ld = result["leading"]
-        print(f"\n── 领涨性 (score={ld['score']}) ──")
-        bk = ld.get("breakdown", {})
-        print(f"  分位排名: {bk.get('avg_pct_rank',0):.1%}（0%最优/100%最差)")
-        print(f"  行业中位数涨幅: {bk.get('industry_median_pct', 0):+.2f}%")
-        print(f"  偏离度加分: {bk.get('deviation_bonus', 0)}")
-
-        # 资金承接性详情
-        ab = result["absorption"]
-        print(f"\n── 资金承接性 (score={ab['score']}) ──")
-        if ab.get("event_count", 0) > 0:
-            print(f"  虹吸事件数: {ab['event_count']}")
-            be = ab.get("best_event")
-            if be:
-                print(f"  最佳事件: {be['dropping_count']}个板块逃逸 "
-                      f"(均跌{be['dropping_avg']:.2f}%) → "
-                      f"目标拉升{be['target_rise']:.2f}%")
-                print(f"  回撤: {be['retrace_pct']*100:.1f}%  |  方向一致性: {be['up_bars']}/6阳")
-        else:
-            print(f"  ℹ️ {ab.get('breakdown',{}).get('note','无事件')}")
-    print()
-    # ── 四维详细日志 ──
     logs = result.get("logs", {})
-    if logs:
-        for dim_key, dim_label in [("drive", "🐉 带动性"), ("anti_drop", "🛡️ 抗跌性"),
-                                    ("leading", "📊 领涨性"), ("absorption", "💰 资金承接")]:
-            lines = logs.get(dim_key, [])
-            if lines:
-                print(f"  {dim_label}:")
-                for line in lines:
-                    print(f"     {line}")
-        print()
+    ds = result["drive"]["score"]
+    dl = logs.get("drive", "")
+    print(f"    - 🐉 带动性({ds:.0f}): {dl}")
+
+    ads = result["anti_drop"]["score"]
+    al = logs.get("anti_drop", "")
+    print(f"    - 🛡️ 抗跌性({ads:.0f}): {al}")
+
+    lds = result["leading"]["score"]
+    ll = logs.get("leading", "")
+    print(f"    - 📊 领涨性({lds:.0f}): {ll}")
+
+    abs_ = result["absorption"]["score"]
+    abl = logs.get("absorption", "")
+    print(f"    - 💰 资金承接({abs_:.0f}): {abl}")
+
+    print(f"    2. 买点建议：")
+    print(f"    - xxx 后续迭代")
 
 
 def _build_reasons(result: dict) -> list[tuple[str, str]]:

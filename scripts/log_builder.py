@@ -1,279 +1,251 @@
 #!/usr/bin/env python3
 """
-四维日志构建模块
+四维日志构建模块 — 生成叙事文本
 
 所有函数均为纯数据→文本转换，不做 API 调用。
+每个函数返回一个叙事字符串，供 caller 嵌入排版。
 """
 
 from typing import Optional
 
 
-# ─── 带动性日志 ──────────────────────────────────────────
+# ─── 带动性叙事 ──────────────────────────────────────────
 
 def build_drive_logs(code: str, name: str, drive_result: dict,
                      stock_5min: list[dict],
                      companions: list[dict],
-                     sector_5min: list[dict]) -> list[str]:
-    """生成带动性详细日志。"""
-    logs = []
+                     sector_5min: list[dict],
+                     industry_name: str,
+                     date: str) -> str:
+    """生成带动性叙事文本。"""
     best = drive_result.get("best_day", {}) or {}
     bk = best.get("breakdown", {}) or {}
     score = drive_result.get("score", 0)
     board_time = best.get("board_time", "")
-    date = best.get("date", "")
+    voice = bk.get("voice_score", 0)
+    follow = bk.get("follow_score", 0)
+    board_lead = bk.get("board_leadership_score", 0)
 
-    if not best:
-        logs.append("带动性: 无涨停日数据")
-        return logs
+    scores_part = f"板块共鸣{voice:.0f}/跟风{follow:.0f}/决策力{board_lead:.0f}"
 
-    # 板块与股票行为描述
-    has_5min = False
-    if stock_5min:
-        pre = _describe_pre_board(stock_5min, board_time)
-        if pre:
-            logs.extend(pre)
-            has_5min = True
-        vol = _describe_volume_spike(stock_5min, board_time, code, name)
-        if vol:
-            logs.extend(vol)
-            has_5min = True
+    if not stock_5min or not sector_5min:
+        if score >= 85:
+            return f"{scores_part}，板块共振强劲"
+        elif score >= 70:
+            return f"{scores_part}，有带动效应"
+        return scores_part
 
-    # 封板时间
-    if board_time and board_time not in ("", "-", "9999"):
-        logs.append(f"{board_time[:2]}:{board_time[2:4]} {name} 封板")
-    elif has_5min:
-        logs.append(f"{name} 封板")
+    # 板块开盘
+    sec_open = _sector_opening(sector_5min)
 
-    # 小弟跟风
-    if companions:
-        for cp in companions:
-            cp_name = cp.get("name", cp.get("code", ""))
-            cp_kline = cp.get("kline", [])
-            cp_log = _describe_companion(cp_kline, cp_name, board_time)
-            if cp_log:
-                logs.append(cp_log)
+    # 封板方式
+    bt = _time_to_index(board_time)
+    if bt is None and board_time in ("", "-", "9999", None):
+        board_desc = f"{name}强势一字封板"
+    elif bt is not None:
+        hh = board_time[:2]
+        mm = board_time[2:4]
+        board_desc = f"{hh}:{mm}{name}封板"
+    else:
+        board_desc = f"{name}封板"
 
-    # 板块指数
-    if sector_5min:
-        sec_log = _describe_sector_reaction(sector_5min, board_time)
-        if sec_log:
-            logs.append(sec_log)
+    # 板块封板后走势
+    trend = _sector_trend(sector_5min, board_time)
 
-    if not logs:
-        logs.append(f"带动性: {score:.0f}分")
+    # 收盘状态
+    close_s = _close_state(sector_5min)
 
-    return logs
+    d = date[-5:] if len(date) >= 5 else date
+    industry_name = industry_name or "该"
+
+    return f"{scores_part}，{industry_name}板块{d}{sec_open}，{board_desc}{trend}{close_s}"
 
 
-def _describe_pre_board(kline: list[dict], board_time: str) -> list[str]:
-    """描述封板前横盘行为。"""
-    tb = _time_to_index(board_time)
-    if tb is None or tb < 2:
-        return []
-    pre_bars = kline[max(0, tb - 4):tb]
-    if len(pre_bars) < 2:
-        return []
-    highs = [b["high"] for b in pre_bars]
-    lows = [b["low"] for b in pre_bars]
-    if not lows or lows[0] == 0:
-        return []
-    range_pct = (max(highs) / min(lows) - 1) * 100
-    if range_pct < 0.5:
-        start_t = pre_bars[0]["time"]
-        end_t = pre_bars[-1]["time"]
-        return [f"{_fmt_time(start_t)}-{_fmt_time(end_t)} 持续横盘，振幅仅{range_pct:.1f}%"]
-    return []
-
-
-def _describe_volume_spike(kline: list[dict], board_time: str,
-                           code: str, name: str) -> list[str]:
-    """描述封板时放量行为。"""
-    tb = _time_to_index(board_time)
-    if tb is None:
-        return []
-    if tb >= len(kline):
-        tb = len(kline) - 1
-    spike_bar = kline[tb]
-    prev_bars = kline[max(0, tb - 5):tb]
-    if not prev_bars:
-        return []
-    avg_vol = sum(b.get("volume", 0) for b in prev_bars) / len(prev_bars)
-    spike_vol = spike_bar.get("volume", 0)
-    if avg_vol > 0 and spike_vol > avg_vol * 1.5:
-        ratio = spike_vol / avg_vol
-        t = _fmt_time(spike_bar["time"])
-        return [f"{t} {name} 放量拉升(量比约{ratio:.0f}x) → 封板"]
-    elif spike_vol > 0:
-        t = _fmt_time(spike_bar["time"])
-        return [f"{t} {name} 拉升封板"]
-    return []
-
-
-def _describe_companion(kline: list[dict], name: str, leader_board_time: str) -> str:
-    """描述小弟跟随行为。"""
-    if not kline or len(kline) < 2:
+def _sector_opening(kline: list[dict]) -> str:
+    """板块开盘方向：低开/高开/平开"""
+    if len(kline) < 1:
         return ""
-    # 找封板后 30 分钟内的最高涨幅
-    tb = _time_to_index(leader_board_time)
+    first = kline[0]
+    o, c = first.get("open", 0), first.get("close", 0)
+    if o <= 0:
+        return ""
+    chg = (c - o) / o * 100
+    if chg < -0.3:
+        return "低开"
+    elif chg > 0.3:
+        return "高开"
+    return "平开"
+
+
+def _sector_trend(kline: list[dict], board_time: str) -> str:
+    """板块封板后走势"""
+    tb = _time_to_index(board_time)
     if tb is None or tb >= len(kline):
-        return ""
-    start = kline[max(0, tb - 1)]
-    end_idx = min(len(kline) - 1, tb + 6)
-    best_pct = 0
-    best_time = ""
-    for i in range(tb + 1, end_idx + 1):
-        b = kline[i]
-        chg = (b["close"] / start["close"] - 1) * 100
-        if chg > best_pct:
-            best_pct = chg
-            best_time = _fmt_time(b["time"])
-    if best_pct >= 1.0:
-        return f"{best_time} {name} 跟随拉升+{best_pct:.1f}%"
-    elif best_pct > 0:
-        return f"{best_time} {name} 小幅跟随+{best_pct:.1f}%"
-    return ""
+        return "带动板块"
+    post = kline[tb:]
+    if len(post) < 2:
+        return "带动板块"
+    start_p = post[0].get("open", 0)
+    if start_p <= 0:
+        return "带动板块"
+    peak = max(b.get("high", 0) for b in post)
+    final = post[-1].get("close", 0)
+    peak_chg = (peak - start_p) / start_p * 100
+    final_chg = (final - start_p) / start_p * 100
+    if peak_chg >= 1.5:
+        return "带动板块持续走强"
+    elif peak_chg >= 0.3:
+        return "带动板块小幅走高"
+    return "带动板块"
 
 
-def _describe_sector_reaction(kline: list[dict], board_time: str) -> str:
-    """描述板块指数对封板的反应。"""
-    if not kline or len(kline) < 2:
-        return ""
-    tb = _time_to_index(board_time)
-    if tb is None:
-        return ""
-    # 封板前一根 vs 封板后最高点
-    pre_idx = max(0, tb - 1)
-    pre_close = kline[pre_idx]["close"]
-    post_end = min(len(kline) - 1, tb + 6)
-    post_high = max(b["close"] for b in kline[tb:post_end + 1])
-    chg = (post_high / pre_close - 1) * 100
-    if chg > 0.5:
-        return f"板块指数同步拉升+{chg:.1f}%"
-    elif chg > 0:
-        return f"板块指数微幅上扬+{chg:.1f}%"
-    return ""
+def _close_state(kline: list[dict]) -> str:
+    """收盘状态：未跳水/尾盘回落"""
+    if len(kline) < 6:
+        return "，持续到收盘"
+    recent = kline[-6:]
+    start_p = recent[0].get("open", 0)
+    final = recent[-1].get("close", 0)
+    if start_p <= 0:
+        return "，持续到收盘"
+    retrace = (final - start_p) / start_p * 100
+    if retrace < -0.3:
+        return "，尾盘有所回落"
+    return "，持续到收盘板块未跳水"
 
 
-# ─── 抗跌性日志 ──────────────────────────────────────────
+# ─── 抗跌性叙事 ──────────────────────────────────────────
 
-def build_anti_drop_logs(anti_drop_result: dict) -> list[str]:
-    """生成抗跌性详细日志。"""
-    logs = []
+def build_anti_drop_logs(anti_drop_result: dict) -> str:
+    """生成抗跌性叙事文本。"""
     daily = anti_drop_result.get("daily_scores", [])
+    dc = anti_drop_result.get("drop_days_count", 0)
+    ads = anti_drop_result.get("score", 50)
+
+    # 整体评价
+    if ads >= 70:
+        overall = f"近{dc}次跳水表现坚挺"
+    elif ads >= 40:
+        overall = f"近{dc}次跳水抗跌一般"
+    elif dc > 0:
+        overall = f"近{dc}次跳水偏弱，警惕系统性风险"
+    else:
+        return "近期无跳水日，抗跌性待验证"
+
+    # 最近一个跳水日详情
     if not daily:
-        data = anti_drop_result.get("details", "")
-        if data:
-            logs.append(f"抗跌性: {data}")
-        else:
-            logs.append("抗跌性: 无跳水日数据")
-        return logs
+        return overall
 
-    for d in daily:
-        date = d.get("date", "")[-5:]  # MM-DD
-        mpct = d.get("market_pct", 0)
-        rel = d.get("rel_score", 0)
-        sup = d.get("support_score", 0)
-        reb = d.get("rebound_score", 0)
-        parts = [f"{date} 大盘{mpct:+.1f}%"]
+    last = daily[-1]
+    d = last.get("date", "")[-5:]
+    mpct = last.get("market_pct", 0)
+    rel = last.get("rel_score", 0)
 
-        if rel >= 80:
-            parts.append("逆势抗跌")
-        elif rel >= 50:
-            parts.append("小幅跟跌")
-        else:
-            parts.append("跟跌明显")
+    if mpct < -2:
+        market_desc = "大盘跳水"
+    elif mpct < -0.7:
+        market_desc = "大盘偏弱"
+    else:
+        market_desc = f"大盘{mpct:+.1f}%"
 
-        if sup >= 70:
-            parts.append("承接强")
-        elif sup >= 40:
-            parts.append("承接一般")
+    if rel >= 80:
+        stock_desc = "逆势抗跌"
+    elif rel >= 50:
+        stock_desc = "小幅跟跌"
+    else:
+        stock_desc = "并未强势上涨或横盘，而是比大盘跌的更多"
 
-        if reb >= 70:
-            parts.append("次日反弹强劲")
-        elif reb >= 50:
-            parts.append("次日小幅反弹")
-
-        logs.append(" → ".join(parts))
-
-    return logs
+    return f"{overall}，{d}{market_desc}，{stock_desc}"
 
 
-# ─── 领涨性日志 ──────────────────────────────────────────
+# ─── 领涨性叙事 ──────────────────────────────────────────
 
-def build_leadership_logs(leading_result: dict) -> list[str]:
-    """生成领涨性详细日志。"""
-    logs = []
+def build_leadership_logs(leading_result: dict) -> str:
+    """生成领涨性叙事文本。"""
     bk = leading_result.get("breakdown", {}) or {}
-    size = bk.get("industry_size", 0)
     rank_pct = bk.get("avg_pct_rank", 0.5)
     median = bk.get("industry_median_pct", 0)
-    dev = bk.get("deviation_bonus", 0)
+    size = bk.get("industry_size", 0)
 
-    rank_pos = int(rank_pct * size) if size > 0 else 0
     if size > 0:
-        logs.append(f"行业排名前{rank_pct*100:.0f}% ({rank_pos}/{size})")
-    else:
-        logs.append(f"行业排名前{rank_pct*100:.0f}%")
-
-    logs.append(f"跑赢中位数{median:+.1f}%")
-    if dev > 5:
-        logs.append(f"偏离度加分+{dev:.0f}")
-
-    return logs
+        rank_pos = int(rank_pct * size)
+        return f"行业排名前{rank_pct*100:.0f}%({rank_pos}/{size})，跑赢中位数{median:+.1f}%"
+    return f"行业排名前{rank_pct*100:.0f}%，跑赢中位数{median:+.1f}%"
 
 
-# ─── 资金承接性日志 ────────────────────────────────────────
+# ─── 资金承接性叙事 ────────────────────────────────────────
 
 def build_absorption_logs(absorption_result: dict,
-                          code_to_name: dict[str, str]) -> list[str]:
-    """生成资金承接性详细日志。"""
-    logs = []
+                          code_to_name: dict[str, str],
+                          stock_5min: list[dict],
+                          sector_5min: list[dict],
+                          date: str,
+                          board_time: str,
+                          name: str,
+                          industry_name: str) -> str:
+    """生成资金承接性叙事文本。"""
     events = absorption_result.get("events") or []
     best = absorption_result.get("best_event")
 
     if not events:
-        note = (absorption_result.get("breakdown", {}) or {}).get("note", "无事件")
-        logs.append(f"资金承接: {note}")
-        return logs
+        return "暂无显著跨板块虹吸信号"
 
-    # 最佳事件
-    if best:
-        logs.append(_format_absorption_event(best, code_to_name))
+    if not best or not stock_5min:
+        return f"发现{len(events)}次跨板块虹吸事件"
 
-    # 其他事件摘要
-    extra = len(events) - 1
-    if extra > 0:
-        logs.append(f"另有{extra}次虹吸事件")
+    # 股票开盘情况
+    opening = _stock_opening(stock_5min)
+    early = _stock_early(stock_5min)
 
-    return logs
-
-
-def _format_absorption_event(e: dict, code_to_name: dict[str, str]) -> str:
-    """格式化单个虹吸事件。"""
-    t = e.get("time", 0)
+    # 事件详情
+    t = best.get("time", 0)
     h = 9 + (t + 30) // 60
     m = (t + 30) % 60
     time_str = f"{h:02d}:{m:02d}"
 
-    sectors = e.get("dropping_sectors", [])
-    named = [code_to_name.get(s, s) for s in sectors[:3]]
-    names = "、".join(named) if named else f"{len(sectors)}个板块"
-    avg = e.get("dropping_avg", 0)
-    count = e.get("dropping_count", 0)
+    dropping = best.get("dropping_sectors", [])
+    dropping_names = [code_to_name.get(s, s) for s in dropping[:2]]
+    names_str = "、".join(dropping_names) if dropping_names else "其他板块"
 
-    rise = e.get("target_rise", 0)
-    up = e.get("up_bars", 0)
-    retrace = e.get("retrace_pct", 0)
+    d = date[-5:] if len(date) >= 5 else date
+    ind = industry_name or "该"
 
-    parts = [f"{time_str} {names}(均跌{avg:.1f}%)等{count}个板块跳水"]
-    parts.append(f"目标板块逆势拉升+{rise:.1f}%")
-    parts.append(f"6K中{up}阳")
-    if retrace < 0.2:
-        parts.append("尾盘几乎无回撤")
-    else:
-        parts.append(f"尾盘回撤{retrace*100:.0f}%")
+    return (f"{d}{time_str}{name}{opening}{early}，{time_str}左右"
+            f"{names_str}板块突然跳水，资金出逃，"
+            f"此时{name}强势封板，带领{ind}板块迅速翻红并持续走强")
 
-    return " → ".join(parts)
+
+def _stock_opening(kline: list[dict]) -> str:
+    """股票开盘：高开/低开"""
+    if not kline:
+        return ""
+    f = kline[0]
+    o, c = f.get("open", 0), f.get("close", 0)
+    if o <= 0:
+        return ""
+    chg = (c - o) / o * 100
+    if chg < -0.3:
+        return "低开"
+    elif chg > 0.3:
+        return "高开"
+    return "平开"
+
+
+def _stock_early(kline: list[dict]) -> str:
+    """股票早盘走势"""
+    if len(kline) < 2:
+        return ""
+    window = kline[:min(4, len(kline))]
+    first = kline[0].get("close", 0)
+    low = min(b.get("low", 0) for b in window)
+    if first <= 0 or low <= 0:
+        return ""
+    chg = (low - first) / first * 100
+    if chg < -1.0:
+        return "迅速下杀"
+    elif chg < -0.3:
+        return "小幅下探"
+    return ""
 
 
 # ─── 工具函数 ────────────────────────────────────────────

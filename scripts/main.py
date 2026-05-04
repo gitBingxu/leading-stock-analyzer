@@ -291,18 +291,22 @@ def _analyze_single(stock: dict, market_kline: list[dict],
         drive_result, anti_drop_result, leading_result, absorption_result
     )
 
-    # 四维详细日志
+    # 四维叙事日志
     logs = {}
     stock_5min = stock_5min_data.get("kline", [])
     companions = stock_5min_data.get("companions", [])
     sector_5min = sector_klines.get(ind_code, []) if ind_code else []
+    date_str = stock.get("date", "")
+    bt = drive_result.get("best_day", {}).get("board_time", "")
     logs["drive"] = build_drive_logs(
-        code, name, drive_result, stock_5min, companions, sector_5min
+        code, name, drive_result, stock_5min, companions, sector_5min,
+        ind_name, date_str
     )
     logs["anti_drop"] = build_anti_drop_logs(anti_drop_result)
     logs["leading"] = build_leadership_logs(leading_result)
     logs["absorption"] = build_absorption_logs(
-        absorption_result, _INDUSTRY_CODE_TO_NAME
+        absorption_result, _INDUSTRY_CODE_TO_NAME, stock_5min,
+        sector_5min, date_str, bt, name, ind_name
     )
 
     return {
@@ -406,32 +410,36 @@ def print_results(results: list[dict]):
     print("=" * 70)
     print("  🐉 龙头战法批量筛选 — 最新交易日")
     print("=" * 70)
-    print()
 
     for rank, r in enumerate(results, 1):
-        medal = ["🥇", "🥈", "🥉", "4", "5"][rank - 1] if rank <= 5 else str(rank)
+        name = r["name"]
+        code = r["code"]
+        ind = r.get("industry", "")
         cons = r.get("est_cons", 1)
-        pct = r.get("pct", 0)
-        print(f"  {medal}  {r['name']}({r['code']})  {r['industry']}  "
-              f"{cons}连板 {pct:+.1f}%")
-        print(f"     综合: {r['composite_score']:.1f}  {r['rating']}")
-        print(f"     带动性 {r['drive']['score']:.0f}  "
-              f"抗跌性 {r['anti_drop']['score']:.0f}  "
-              f"领涨性 {r['leading']['score']:.0f}  "
-              f"承接 {r['absorption']['score']:.0f}")
-        print(f"     📋 ", end="")
-        for label, text in r.get("reasons", []):
-            print(f"{label}: {text}", end="  ")
-        print()
-        # 四维详细日志
-        logs = r.get("logs", {})
-        for dim_key, dim_label in [("drive", "🐉 带动性"), ("anti_drop", "🛡️ 抗跌性"),
-                                    ("leading", "📊 领涨性"), ("absorption", "💰 资金承接")]:
-            lines = logs.get(dim_key, [])
-            if lines:
-                for line in lines:
-                    print(f"         {line}")
-        print()
+        score = r["composite_score"]
+        rating = r["rating"].replace("🐉 ", "").replace("⭐ ", "").replace("📊 ", "").replace("🐔 ", "")
+
+        print(f"\n{name}({code})——{ind}——{cons}连板")
+        print(f"    1. 综合评分: {score:.1f}，{rating}")
+
+        ds = r["drive"]["score"]
+        dl = r.get("logs", {}).get("drive", "")
+        print(f"    - 🐉 带动性({ds:.0f}): {dl}")
+
+        ads = r["anti_drop"]["score"]
+        al = r.get("logs", {}).get("anti_drop", "")
+        print(f"    - 🛡️ 抗跌性({ads:.0f}): {al}")
+
+        lds = r["leading"]["score"]
+        ll = r.get("logs", {}).get("leading", "")
+        print(f"    - 📊 领涨性({lds:.0f}): {ll}")
+
+        abs_ = r["absorption"]["score"]
+        abl = r.get("logs", {}).get("absorption", "")
+        print(f"    - 💰 资金承接({abs_:.0f}): {abl}")
+
+        print(f"    2. 买点建议：")
+        print(f"    - xxx 后续迭代")
 
 
 # ─── 主流程 ─────────────────────────────────────────────
