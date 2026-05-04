@@ -12,6 +12,7 @@ import sys
 import json
 import argparse
 import time
+import os
 from datetime import datetime
 
 from eastmoney_api import (
@@ -37,20 +38,49 @@ from log_builder import (
 )
 
 
-def analyze_stock(code: str, verbose: bool = False) -> dict:
+def _load_shared_data(filepath, max_age_minutes=10):
+    """校验并加载共享数据。返回 (limit_up_list, market_kline) 或 (None, None)。"""
+    if not filepath or not os.path.exists(filepath):
+        return None, None
+
+    mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
+    age_seconds = (datetime.now() - mtime).total_seconds()
+    if age_seconds > max_age_minutes * 60:
+        print(f"  ⚠️ 共享数据过期({age_seconds:.0f}s)，自行拉取", file=sys.stderr)
+        return None, None
+
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+    except Exception:
+        return None, None
+
+    today = datetime.now().strftime("%Y%m%d")
+    if data.get("trading_date", "") != today:
+        print(f"  ⚠️ 共享数据日期 ≠ 今天，自行拉取", file=sys.stderr)
+        return None, None
+
+    print(f"  ✅ 复用共享数据 ({os.path.basename(filepath)})", file=sys.stderr)
+    return data.get("limit_up_list", []), data.get("market_kline", [])
+
+
+def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None) -> dict:
     """对单只股票执行四维分析。"""
 
     print(f"🔍 正在分析 {code}...", file=sys.stderr)
 
     # ── 数据采集 ──
-    print("  📡 获取涨停榜...", file=sys.stderr)
-    limit_up_list = get_limit_up_list()
+    limit_up_list, market_kline = _load_shared_data(shared_data_file)
+    if limit_up_list is None:
+        print("  📡 获取涨停榜...", file=sys.stderr)
+        limit_up_list = get_limit_up_list()
 
     print("  📊 获取个股K线...", file=sys.stderr)
     stock_kline = get_stock_kline(code, days=20)
 
-    print("  📈 获取大盘指数K线...", file=sys.stderr)
-    market_kline = get_market_index_kline("1.000001", days=20)
+    if market_kline is None:
+        print("  📈 获取大盘指数K线...", file=sys.stderr)
+        market_kline = get_market_index_kline("1.000001", days=20)
 
     print("  🏷️  获取实时行情...", file=sys.stderr)
     quote = get_stock_quote(code)
@@ -350,9 +380,11 @@ def main():
     parser.add_argument("code", help="股票代码，如 002xxx 或 600519")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细输出")
     parser.add_argument("--json", "-j", action="store_true", help="JSON 输出")
+    parser.add_argument("--shared-data", help="共享数据 JSON 文件路径（由 preload.py 生成）")
     args = parser.parse_args()
 
-    result = analyze_stock(args.code, verbose=args.verbose or args.json)
+    result = analyze_stock(args.code, verbose=args.verbose or args.json,
+                           shared_data_file=args.shared_data)
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))

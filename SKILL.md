@@ -25,6 +25,10 @@ python3 scripts/main.py --top 5 --json      # JSON 格式（供定时任务使�
 python3 scripts/analyze.py 002xxx           # 基础分析
 python3 scripts/analyze.py 002xxx -v        # 详细报告
 python3 scripts/analyze.py 002xxx --json    # JSON 输出
+
+# 复用预加载数据（agent 编排工作流，避免重复请求）
+python3 scripts/preload.py                                    # ① 生成共享数据，输出文件路径
+python3 scripts/analyze.py 002xxx --shared-data <路径> --json # ② 并行分析，自动校验时效
 ```
 
 ## 四个维度
@@ -55,14 +59,19 @@ python3 scripts/analyze.py 002xxx --json    # JSON 输出
 
 详见 [references/api_reference.md](references/api_reference.md)。
 
-## 批量筛选流程（main.py）
+## Agent 批量筛选流程
 
-```
-① 拉取涨停榜 → 过滤主板+非ST
-② 推算连板数 → 按连板降序
-③ 取前10候选（大量时可选 --candidates 30）
-④ 逐个四维分析（带动性35% / 抗跌性15% / 领涨性25% / 资金承接25%）
-⑤ 按加权得分排序 → 输出 Top N（含四维详细日志）
+当用户请求批量龙头筛选时，按以下步骤编排：
+
+1. `python3 scripts/preload.py` → 获取共享数据文件路径（自动清理 3 天前旧文件）
+2. 读取共享数据 JSON，过滤主板 + 非ST 涨停股
+3. 推算每只连板数 → 连板降序取前 10 候选
+4. 并行运行 `python3 scripts/analyze.py <code> --shared-data <路径> --json`
+5. 按 `composite_score` 降序 → 输出 Top N（含四维详细日志）
+
+人工终端可直接用：
+```bash
+python3 scripts/main.py                     # 一键批量筛选（保留原版入口）
 ```
 
 ## 输出说明
@@ -79,6 +88,7 @@ python3 scripts/analyze.py 002xxx --json    # JSON 输出
 ```
 scripts/
 ├── main.py              # 批量筛选主流程（定时任务入口）
+├── preload.py           # 共享数据预加载 + 自动清理
 ├── analyze.py           # 单票深度分析
 ├── eastmoney_api.py     # 东方财富+腾讯 API 封装
 ├── drive_analysis.py    # 带动性分析
