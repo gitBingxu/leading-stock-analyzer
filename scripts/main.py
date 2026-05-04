@@ -244,7 +244,7 @@ def print_results(results):
 def main():
     parser = argparse.ArgumentParser(description="龙头战法批量筛选")
     parser.add_argument("--top", type=int, default=5, help="输出前 N 名（默认5）")
-    parser.add_argument("--candidates", type=int, default=10,
+    parser.add_argument("--candidates", type=int, default=20,
                         help="分析候选数（默认10）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     parser.add_argument("--workers", type=int, default=2,
