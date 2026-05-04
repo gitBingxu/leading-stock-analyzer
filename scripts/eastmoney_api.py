@@ -107,7 +107,7 @@ def get_limit_up_list(date: Optional[str] = None) -> list[dict]:
 
         results.append({
             "code": code,
-            "name": diff.get("f14", ""),
+            "name": _clean_name(diff.get("f14", "")),
             "pct": pct,
             "date": date_str,
             "board_time": board_time,
@@ -219,7 +219,7 @@ def get_industry_components(industry_code_or_name: str) -> list[dict]:
             except ValueError: pct = 0
         results.append({
             "code": diff.get("f12", ""),
-            "name": diff.get("f14", ""),
+            "name": _clean_name(diff.get("f14", "")),
             "pct": pct,
             "turnover": diff.get("f8", 0) or 0,
             "amount": diff.get("f6", 0) or 0,
@@ -370,7 +370,7 @@ def get_stock_quote(code: str) -> dict:
     d = data.get("data", {})
     return {
         "code": d.get("f57", code),
-        "name": d.get("f58", ""),
+        "name": _clean_name(d.get("f58", "")),
         "price": d.get("f43", 0) / 100 if d.get("f43") else 0,
         "pct": d.get("f170", 0) / 100 if d.get("f170") else 0,
         "open": d.get("f44", 0) / 100 if d.get("f44") else 0,
@@ -502,6 +502,11 @@ def get_all_active_sector_5min() -> dict[str, list[dict]]:
 
 
 # ─── 工具函数 ────────────────────────────────────────────
+
+def _clean_name(name: str) -> str:
+    """清洗股票名字中的空格（东方财富 API 对三字股名会插入空格）。"""
+    return name.replace(" ", "")
+
 
 def _get_market(code: str) -> str:
     """根据代码前缀判断市场。"""

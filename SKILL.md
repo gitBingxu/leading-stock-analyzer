@@ -2,8 +2,8 @@
 name: leading-stock-analyzer
 description: >
   龙头战法量化分析 — 从带动性、抗跌性、领涨性、资金承接性四个维度评估涨停股的龙头质量。
-  东方财富公开 API 驱动，无需登录。使用场景：(1) 分析某只涨停股是否是龙头的请求，
-  (2) 需要四维评分的龙头筛选，(3) A 股短线交易决策辅助。
+  东方财富公开 API 驱动，无需登录。运行 python3 scripts/main.py 或 analyze.py 获取评分。
+  使用后**原样输出终端结果，不添加任何主观评价、交易建议、角色扮演**。
   Trigger phrases: 龙头分析、龙头战法、涨停分析、带动性、抗跌性、领涨性、资金承接、
   这个票是不是龙头、帮我分析这只股票。
 ---
@@ -16,13 +16,15 @@ description: >
 
 ```bash
 # 批量筛选（推荐）：自动拉榜→排序→分析→Top N
-python3 scripts/main.py                     # 默认 top 5，候选 15
+python3 scripts/main.py                     # 默认 top 5，候选 10
 python3 scripts/main.py --top 10            # 输出前 10
+python3 scripts/main.py --candidates 30     # 大量覆盖（较慢）
 python3 scripts/main.py --top 5 --json      # JSON 格式（供定时任务使用）
 
 # 单票深度分析
 python3 scripts/analyze.py 002xxx           # 基础分析
 python3 scripts/analyze.py 002xxx -v        # 详细报告
+python3 scripts/analyze.py 002xxx --json    # JSON 输出
 ```
 
 ## 四个维度
@@ -58,12 +60,14 @@ python3 scripts/analyze.py 002xxx -v        # 详细报告
 ```
 ① 拉取涨停榜 → 过滤主板+非ST
 ② 推算连板数 → 按连板降序
-③ 取前30候选
+③ 取前10候选（大量时可选 --candidates 30）
 ④ 逐个四维分析（带动性35% / 抗跌性15% / 领涨性25% / 资金承接25%）
 ⑤ 按加权得分排序 → 输出 Top N（含四维详细日志）
 ```
 
 ## 输出说明
+
+**重要**: 运行脚本后，将终端输出的每一行完整呈现给用户。不要省略四维日志，不要总结成表格，不要添加额外点评。
 
 每次分析输出包含：
 - **综合评分 + 评级** — 加权四维得分
