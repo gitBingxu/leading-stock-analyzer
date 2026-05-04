@@ -30,6 +30,7 @@ from eastmoney_api import (
     get_stock_quote,
     get_sector_5min_kline,
     get_stock_5min_kline,
+    get_stock_concept_map,
     _INDUSTRY_CODE_TO_NAME,
 )
 from drive_analysis import calc_drive_score
@@ -110,7 +111,11 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict],
         except Exception:
             continue
 
-    # 预加载个股5分钟K线（按行业分组，去重）
+    # 股票→真实概念板块映射（替代申万行业，校准带动性分析）
+    candidate_code_set = {s["code"] for s in candidates}
+    concept_map = get_stock_concept_map(all_lu, candidate_code_set)
+
+    # 预加载个股5分钟K线（按概念分组，去重）
     stock_5min_data = {}
     by_industry: dict[str, list[dict]] = {}
     for s in candidates:
@@ -165,7 +170,7 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict],
 
         try:
             result = _analyze_single(stock, market_kline, all_lu, sector_klines,
-                                     stock_5min_data.get(code, {}))
+                                     stock_5min_data.get(code, {}), concept_map)
             results.append(result)
         except Exception as e:
             print(f"    ⚠️ 分析失败: {e}", file=sys.stderr)
@@ -191,12 +196,22 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict],
 
 def _analyze_single(stock: dict, market_kline: list[dict],
                     all_lu: list[dict], sector_klines: dict[str, list[dict]],
-                    stock_5min_data: dict) -> dict:
+                    stock_5min_data: dict,
+                    concept_map: dict[str, tuple[str, str]]) -> dict:
     """对单只股票执行完整四维分析。"""
     code = stock["code"]
     name = stock["name"]
     ind_name = stock.get("industry_name", "")
     ind_code = stock.get("industry_code", "")
+
+    # 概念板块校准：优先用当日最活跃概念替代申万行业
+    if code in concept_map:
+        cc, cn = concept_map[code]
+        drive_ind_code = cc if cc else ind_code
+        drive_ind_name = cn
+    else:
+        drive_ind_code = ind_code
+        drive_ind_name = ind_name
 
     stock_kline = stock.get("_cached_kline", [])
     if not stock_kline:
@@ -218,18 +233,18 @@ def _analyze_single(stock: dict, market_kline: list[dict],
     # ── 带动性 ──
     industry_components = []
     co_limitup_map = {}
-    drive_result = {"score": 30, "breakdown": {"error": "无行业数据"}}
+    drive_result = {"score": 30, "breakdown": {"error": "无板块数据"}}
 
-    if ind_code:
+    if drive_ind_code:
         try:
-            industry_components = get_industry_components(ind_code)
+            industry_components = get_industry_components(drive_ind_code)
         except Exception:
             industry_components = []
 
         try:
             co_list = [
                 lu for lu in all_lu
-                if lu.get("industry_name") == ind_name
+                if lu.get("code") in {c.get("code") for c in industry_components}
                 and lu["code"] != code
             ]
             co_limitup_map[stock.get("date", "")] = co_list
@@ -295,24 +310,25 @@ def _analyze_single(stock: dict, market_kline: list[dict],
     logs = {}
     stock_5min = stock_5min_data.get("kline", [])
     companions = stock_5min_data.get("companions", [])
-    sector_5min = sector_klines.get(ind_code, []) if ind_code else []
+    sector_5min = sector_klines.get(drive_ind_code, []) if drive_ind_code else []
     date_str = stock.get("date", "")
     bt = drive_result.get("best_day", {}).get("board_time", "")
     logs["drive"] = build_drive_logs(
         code, name, drive_result, stock_5min, companions, sector_5min,
-        ind_name, date_str
+        drive_ind_name, date_str
     )
     logs["anti_drop"] = build_anti_drop_logs(anti_drop_result)
     logs["leading"] = build_leadership_logs(leading_result)
     logs["absorption"] = build_absorption_logs(
         absorption_result, _INDUSTRY_CODE_TO_NAME, stock_5min,
-        sector_5min, date_str, bt, name, ind_name
+        sector_5min, date_str, bt, name, drive_ind_name
     )
 
     return {
         "code": code,
         "name": name,
         "industry": ind_name,
+        "concept": drive_ind_name if code in concept_map else "",
         "est_cons": stock.get("est_cons", 1),
         "pct": stock.get("pct", 0),
         "price": quote.get("price", 0),
@@ -415,11 +431,13 @@ def print_results(results: list[dict]):
         name = r["name"]
         code = r["code"]
         ind = r.get("industry", "")
+        concept = r.get("concept", "")
+        display_ind = f"{concept}（{ind}）" if concept else ind
         cons = r.get("est_cons", 1)
         score = r["composite_score"]
         rating = r["rating"].replace("🐉 ", "").replace("⭐ ", "").replace("📊 ", "").replace("🐔 ", "")
 
-        print(f"\n{name}({code})——{ind}——{cons}连板")
+        print(f"\n{name}({code})——{display_ind}——{cons}连板")
         print(f"    1. 综合评分: {score:.1f}，{rating}")
 
         ds = r["drive"]["score"]

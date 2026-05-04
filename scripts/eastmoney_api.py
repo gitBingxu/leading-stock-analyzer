@@ -142,6 +142,21 @@ _INDUSTRY_NAME_TO_CODE: dict[str, str] = {}
 _INDUSTRY_CODE_TO_NAME: dict[str, str] = {}
 _INDUSTRY_MAP_LOADED = False
 
+# 概念板块映射
+_CONCEPT_CODE_TO_NAME: dict[str, str] = {}
+_CONCEPT_MAP_LOADED = False
+
+# 技术性板块名称（非题材，过滤用）
+_TECH_BOARD_NAMES = {
+    "昨日首板", "昨日涨停", "昨日涨停_含一字", "昨日连板", "昨日连板_含一字",
+    "昨日触板", "东方财富热股", "历史新高", "百日新高", "最近多板",
+    "近期新高", "2026一季报预增", "2026—季报扭亏", "预盈预增", "预亏预减",
+    "机构重仓", "基金重仓", "券商重仓", "信托重仓", "保险重仓",
+    "QFII重仓", "社保重仓", "融资融券", "深股通", "沪股通",
+    "创业板综", "深圳特区", "广东板块", "浙江板块", "江苏板块",
+    "北京板块", "上海板块", "山东板块",
+}
+
 
 def _load_industry_map():
     """从东方财富加载全部行业编码→名称映射。"""
@@ -181,6 +196,112 @@ def _industry_name_to_code(name: str) -> str:
         return ""
     _load_industry_map()
     return _INDUSTRY_NAME_TO_CODE.get(name, "")
+
+
+# ─── 概念板块映射 ────────────────────────────────────────
+
+def _load_concept_map():
+    """加载概念板块编码→名称映射。"""
+    global _CONCEPT_CODE_TO_NAME, _CONCEPT_MAP_LOADED
+    if _CONCEPT_MAP_LOADED:
+        return
+    try:
+        for pn in [1, 2]:
+            params = {
+                "pn": str(pn), "pz": "200", "po": "1", "np": "1",
+                "fltt": "2", "invt": "2", "fid": "f3",
+                "fs": "m:90+t:3",
+                "fields": "f12,f14",
+            }
+            qs = urllib.parse.urlencode(params)
+            data = _fetch(f"{BASE_URL}/clist/get?{qs}")
+            raw_diffs = data.get("data", {}).get("diff", [])
+            if isinstance(raw_diffs, dict):
+                raw_diffs = list(raw_diffs.values())
+            if not raw_diffs:
+                break
+            for item in raw_diffs:
+                if isinstance(item, dict):
+                    code = item.get("f12", "")
+                    name = item.get("f14", "")
+                    if code and name and name not in _TECH_BOARD_NAMES:
+                        _CONCEPT_CODE_TO_NAME[code] = name
+    except Exception:
+        pass
+    _CONCEPT_MAP_LOADED = True
+
+
+# 手动概念覆写映射（已知市场叙事与官方分类不一致的票）
+_CONCEPT_OVERRIDE: dict[str, str] = {
+    "603095": "算力概念",
+    "603629": "算力概念",
+}
+
+
+def get_stock_concept_map(limit_up_list: list[dict],
+                          candidate_codes: set) -> dict[str, tuple[str, str]]:
+    """
+    将股票映射到当日最活跃的概念板块。
+    返回: {code: (concept_code, concept_name), ...}
+    """
+    # 手动覆写
+    result = {}
+    for code in candidate_codes:
+        cn = _CONCEPT_OVERRIDE.get(code)
+        if cn:
+            result[code] = ("", cn)
+
+    _load_concept_map()
+    if not _CONCEPT_CODE_TO_NAME:
+        return result
+
+    lu_codes = {lu.get("code", "") for lu in limit_up_list}
+    all_codes = lu_codes | candidate_codes
+
+    # 取当日涨幅前 100 的概念板块（扫更多覆盖）
+    params = {
+        "pn": "1", "pz": "100", "po": "0", "np": "1",
+        "fltt": "2", "invt": "2", "fid": "f3",
+        "fs": "m:90+t:3",
+        "fields": "f12,f14,f3",
+    }
+    qs = urllib.parse.urlencode(params)
+    data = _fetch(f"{BASE_URL}/clist/get?{qs}")
+    diffs = data.get("data", {}).get("diff", [])
+    if isinstance(diffs, dict):
+        diffs = list(diffs.values())
+
+    thematic_codes = [
+        d.get("f12", "") for d in diffs
+        if d.get("f14", "") not in _TECH_BOARD_NAMES
+    ][:50]
+
+    # 逐个概念板块查成分股
+    stock_concepts: dict[str, list[tuple[str, str, int]]] = {}
+    for cc in thematic_codes:
+        cn = _CONCEPT_CODE_TO_NAME.get(cc, "")
+        if not cn:
+            continue
+        try:
+            constituents = get_industry_components(cc)
+            time.sleep(0.1)
+            up_in_concept = [c for c in constituents if c.get("code", "") in lu_codes]
+            up_count = len(up_in_concept)
+            # 记录所有属于该概念的候选/涨停票（不限于 ≥2）
+            for c in constituents:
+                sc = c.get("code", "")
+                if sc in all_codes:
+                    stock_concepts.setdefault(sc, []).append((cn, cc, up_count))
+        except Exception:
+            continue
+
+    # 每只票取涨停股最多的概念（若无涨停概念则取任意匹配的）
+    for sc, concepts in stock_concepts.items():
+        # 优先选涨停家数多的，平局时保持第一个
+        best = max(concepts, key=lambda x: x[2])
+        result[sc] = (best[1], best[0])
+
+    return result
 
 
 def get_industry_components(industry_code_or_name: str) -> list[dict]:
