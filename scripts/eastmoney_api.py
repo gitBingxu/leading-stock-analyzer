@@ -139,12 +139,13 @@ def infer_consecutive_boards(code: str, kline: list[dict]) -> int:
 
 # 行业名称 → 编码映射（常用板块，运行时动态扩展）
 _INDUSTRY_NAME_TO_CODE: dict[str, str] = {}
+_INDUSTRY_CODE_TO_NAME: dict[str, str] = {}
 _INDUSTRY_MAP_LOADED = False
 
 
 def _load_industry_map():
     """从东方财富加载全部行业编码→名称映射。"""
-    global _INDUSTRY_NAME_TO_CODE, _INDUSTRY_MAP_LOADED
+    global _INDUSTRY_NAME_TO_CODE, _INDUSTRY_CODE_TO_NAME, _INDUSTRY_MAP_LOADED
     if _INDUSTRY_MAP_LOADED:
         return
     try:
@@ -168,6 +169,7 @@ def _load_industry_map():
                     name = item.get("f14", "")
                     if code and name:
                         _INDUSTRY_NAME_TO_CODE[name] = code
+                        _INDUSTRY_CODE_TO_NAME[code] = name
     except Exception:
         pass
     _INDUSTRY_MAP_LOADED = True
@@ -244,22 +246,30 @@ def get_stock_kline(code: str, days: int = 20) -> list[dict]:
 
 
 def _get_kline_tencent(code: str, days: int = 20) -> list[dict]:
-    """通过腾讯财经 API 获取日K线。"""
+    """通过腾讯财经 API 获取日K线（内置重试）。"""
     prefix = "sh" if code.startswith(("6", "9")) else "sz"
     url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
            f"?param={prefix}{code},day,,,{days},qfq")
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://gu.qq.com/",
-        })
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        key = f"{prefix}{code}"
-        klines = data.get("data", {}).get(key, {}).get("qfqday", [])
-        if not klines:
-            klines = data.get("data", {}).get(key, {}).get("day", [])
-    except Exception:
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://gu.qq.com/",
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            key = f"{prefix}{code}"
+            klines = data.get("data", {}).get(key, {}).get("qfqday", [])
+            if not klines:
+                klines = data.get("data", {}).get(key, {}).get("day", [])
+            if klines:
+                break
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                return []
+    if not klines:
         return []
 
     results = []
@@ -306,7 +316,7 @@ def _get_kline_eastmoney(code: str, days: int = 20) -> list[dict]:
     }
     qs = urllib.parse.urlencode(params)
     try:
-        data = _fetch(f"https://push2.eastmoney.com/api/qt/stock/kline/get?{qs}")
+        data = _fetch(f"https://push2his.eastmoney.com/api/qt/stock/kline/get?{qs}")
     except Exception:
         return []
 
@@ -392,7 +402,51 @@ def get_sector_5min_kline(industry_code: str, bars: int = 48) -> list[dict]:
     }
     qs = urllib.parse.urlencode(params)
     try:
-        data = _fetch(f"https://push2.eastmoney.com/api/qt/stock/kline/get?{qs}")
+        data = _fetch(f"https://push2his.eastmoney.com/api/qt/stock/kline/get?{qs}")
+    except Exception:
+        return []
+
+    results = []
+    klines = data.get("data", {}).get("klines", [])
+    for line in klines:
+        parts = line.split(",")
+        if len(parts) < 11:
+            continue
+        results.append({
+            "time": parts[0].split(" ")[-1][:4] if " " in parts[0] else parts[0],
+            "open":  float(parts[1]),
+            "close": float(parts[2]),
+            "high":  float(parts[3]),
+            "low":   float(parts[4]),
+            "volume":float(parts[5]),
+            "amount":float(parts[6]),
+        })
+    return results
+
+
+# ─── 个股 5 分钟 K 线 ────────────────────────────────────
+
+def get_stock_5min_kline(code: str, bars: int = 48) -> list[dict]:
+    """
+    获取个股 5 分钟 K 线。
+    code: "002192" 或 "600519"
+    bars: 默认 48（一天 4h × 12 根/小时）
+    返回: [{"time":"0935","open":...,"close":...,"high":...,"low":...,"volume":...,"amount":...}, ...]
+    """
+    market = _get_market(code)
+    secid = f"{market}.{code}"
+    params = {
+        "secid": secid,
+        "klt": "5",
+        "lmt": str(bars),
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "ut": "fa5fd1943c7b386f172d6893dbfbfdc4",
+        "fqt": "1",
+    }
+    qs = urllib.parse.urlencode(params)
+    try:
+        data = _fetch(f"https://push2his.eastmoney.com/api/qt/stock/kline/get?{qs}")
     except Exception:
         return []
 
@@ -481,7 +535,7 @@ def parse_board_minutes(board_time: Optional[str]) -> Optional[int]:
 
 def get_market_index_kline(index_code: str = "1.000001", days: int = 20) -> list[dict]:
     """
-    获取大盘指数日K线（使用腾讯 API）。
+    获取大盘指数日K线（优先腾讯，失败时回退东方财富）。
     index_code: "1.000001"（上证）, "0.399001"（深成指）, "0.399006"（创业板指）
     """
     # 腾讯 API: sh000001, sz399001, sz399006
@@ -496,21 +550,36 @@ def get_market_index_kline(index_code: str = "1.000001", days: int = 20) -> list
     else:
         qq_code = f"sh{index_code.split('.')[-1]}"
 
+    # 优先腾讯
+    results = _try_tencent_index_kline(qq_code, days)
+    if results:
+        return results
+
+    # 备用：东方财富
+    return _get_kline_eastmoney(index_code, days)
+
+
+def _try_tencent_index_kline(qq_code: str, days: int) -> list[dict]:
     url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
            f"?param={qq_code},day,,,{days},qfq")
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://gu.qq.com/",
-        })
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return []
-
-    klines = data.get("data", {}).get(qq_code, {}).get("qfqday", [])
-    if not klines:
-        klines = data.get("data", {}).get(qq_code, {}).get("day", [])
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://gu.qq.com/",
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            klines = data.get("data", {}).get(qq_code, {}).get("qfqday", [])
+            if not klines:
+                klines = data.get("data", {}).get(qq_code, {}).get("day", [])
+            if klines:
+                break
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                return []
 
     results = []
     pre_close = None

@@ -131,7 +131,7 @@ GET https://push2his.eastmoney.com/api/qt/stock/kline/get
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| `secid` | `90.BK0429` | 板块指数 |
+| `secid` | `90.BK0429` 或 `0.002192` | 板块指数 / 个股 |
 | `klt` | `5` | 5分钟K |
 | `lmt` | `48` | 一天 48 根 |
 

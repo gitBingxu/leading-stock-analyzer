@@ -29,11 +29,19 @@ from eastmoney_api import (
     get_market_index_kline,
     get_stock_quote,
     get_sector_5min_kline,
+    get_stock_5min_kline,
+    _INDUSTRY_CODE_TO_NAME,
 )
 from drive_analysis import calc_drive_score
 from anti_drop import calc_anti_drop_score
 from leadership import calc_leading_score
 from absorption import calc_absorption_score
+from log_builder import (
+    build_drive_logs,
+    build_anti_drop_logs,
+    build_leadership_logs,
+    build_absorption_logs,
+)
 
 
 # ─── Step 1: 获取并过滤涨停榜 ─────────────────────────
@@ -67,6 +75,7 @@ def rank_by_consecutive(stocks: list[dict]) -> list[dict]:
     for s in stocks:
         try:
             kl = get_stock_kline(s["code"], 20)
+            time.sleep(0.05)
             s["_cached_kline"] = kl
             s["est_cons"] = infer_consecutive_boards(s["code"], kl) if kl else 1
         except Exception:
@@ -85,7 +94,6 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict],
     # 预加载板块5分钟K线（从涨停榜中收集活跃板块，用于资金承接性跨板块对比）
     sector_klines = {}
     target_codes = {s.get("industry_code", "") for s in candidates if s.get("industry_code")}
-    # 从涨停榜中额外补充 8 个最活跃板块
     ind_count = {}
     for lu in all_lu:
         ic = lu.get("industry_code", "")
@@ -102,6 +110,47 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict],
         except Exception:
             continue
 
+    # 预加载个股5分钟K线（按行业分组，去重）
+    stock_5min_data = {}
+    by_industry: dict[str, list[dict]] = {}
+    for s in candidates:
+        ic = s.get("industry_code", "")
+        if ic:
+            by_industry.setdefault(ic, []).append(s)
+
+    for ic, stocks in by_industry.items():
+        candidate_codes = {s["code"] for s in stocks}
+        # 从涨停榜中找 2 只同行业小弟
+        companions = [
+            lu for lu in all_lu
+            if lu.get("industry_code") == ic and lu["code"] not in candidate_codes
+        ][:2]
+        all_codes = list(candidate_codes) + [c["code"] for c in companions]
+        # 拉取 5 分钟 K 线（去重）
+        kline_cache = {}
+        for sc in all_codes:
+            if sc not in kline_cache:
+                try:
+                    kl = get_stock_5min_kline(sc)
+                    time.sleep(0.1)
+                    if kl:
+                        kline_cache[sc] = kl
+                except Exception:
+                    kline_cache[sc] = []
+        # 为每只候选票组装数据
+        for s in stocks:
+            code = s["code"]
+            comp_data = [
+                {"code": c["code"], "name": c["name"],
+                 "kline": kline_cache.get(c["code"], [])}
+                for c in companions
+                if kline_cache.get(c["code"])
+            ]
+            stock_5min_data[code] = {
+                "kline": kline_cache.get(code, []),
+                "companions": comp_data,
+            }
+
     results = []
     total = len(candidates)
 
@@ -115,7 +164,8 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict],
               file=sys.stderr)
 
         try:
-            result = _analyze_single(stock, market_kline, all_lu, sector_klines)
+            result = _analyze_single(stock, market_kline, all_lu, sector_klines,
+                                     stock_5min_data.get(code, {}))
             results.append(result)
         except Exception as e:
             print(f"    ⚠️ 分析失败: {e}", file=sys.stderr)
@@ -140,7 +190,8 @@ def batch_analyze(candidates: list[dict], market_kline: list[dict],
 
 
 def _analyze_single(stock: dict, market_kline: list[dict],
-                    all_lu: list[dict], sector_klines: dict[str, list[dict]]) -> dict:
+                    all_lu: list[dict], sector_klines: dict[str, list[dict]],
+                    stock_5min_data: dict) -> dict:
     """对单只股票执行完整四维分析。"""
     code = stock["code"]
     name = stock["name"]
@@ -240,6 +291,20 @@ def _analyze_single(stock: dict, market_kline: list[dict],
         drive_result, anti_drop_result, leading_result, absorption_result
     )
 
+    # 四维详细日志
+    logs = {}
+    stock_5min = stock_5min_data.get("kline", [])
+    companions = stock_5min_data.get("companions", [])
+    sector_5min = sector_klines.get(ind_code, []) if ind_code else []
+    logs["drive"] = build_drive_logs(
+        code, name, drive_result, stock_5min, companions, sector_5min
+    )
+    logs["anti_drop"] = build_anti_drop_logs(anti_drop_result)
+    logs["leading"] = build_leadership_logs(leading_result)
+    logs["absorption"] = build_absorption_logs(
+        absorption_result, _INDUSTRY_CODE_TO_NAME
+    )
+
     return {
         "code": code,
         "name": name,
@@ -254,6 +319,7 @@ def _analyze_single(stock: dict, market_kline: list[dict],
         "leading": leading_result,
         "absorption": absorption_result,
         "reasons": reasons,
+        "logs": logs,
     }
 
 
@@ -357,6 +423,14 @@ def print_results(results: list[dict]):
         for label, text in r.get("reasons", []):
             print(f"{label}: {text}", end="  ")
         print()
+        # 四维详细日志
+        logs = r.get("logs", {})
+        for dim_key, dim_label in [("drive", "🐉 带动性"), ("anti_drop", "🛡️ 抗跌性"),
+                                    ("leading", "📊 领涨性"), ("absorption", "💰 资金承接")]:
+            lines = logs.get(dim_key, [])
+            if lines:
+                for line in lines:
+                    print(f"         {line}")
         print()
 
 

@@ -19,14 +19,22 @@ from eastmoney_api import (
     get_industry_components,
     get_stock_kline,
     get_stock_quote,
-    get_all_active_sector_5min,
     get_market_index_kline,
     infer_consecutive_boards,
+    get_sector_5min_kline,
+    get_stock_5min_kline,
+    _INDUSTRY_CODE_TO_NAME,
 )
 from drive_analysis import calc_drive_score
 from anti_drop import calc_anti_drop_score
 from leadership import calc_leading_score
 from absorption import calc_absorption_score
+from log_builder import (
+    build_drive_logs,
+    build_anti_drop_logs,
+    build_leadership_logs,
+    build_absorption_logs,
+)
 
 
 def analyze_stock(code: str, verbose: bool = False) -> dict:
@@ -124,6 +132,7 @@ def analyze_stock(code: str, verbose: bool = False) -> dict:
             for ic in sorted(ind_count, key=ind_count.get, reverse=True)[:6]:
                 try:
                     kl = get_sector_5min_kline(ic)
+                    time.sleep(0.1)
                     if kl and len(kl) >= 40:
                         all_sectors[ic] = kl
                 except Exception:
@@ -132,6 +141,47 @@ def analyze_stock(code: str, verbose: bool = False) -> dict:
                 absorption_result = calc_absorption_score(industry_code, all_sectors)
         except Exception as e:
             absorption_result = {"score": 50, "breakdown": {"error": str(e)}}
+
+    # ── 5分钟K线数据（用于详细日志）──
+    stock_5min = []
+    companions = []
+    sector_5min = all_sectors.get(industry_code, []) if industry_code else []
+    try:
+        print("  ⏱️  加载5分钟K线...", file=sys.stderr)
+        stock_5min = get_stock_5min_kline(code)
+        time.sleep(0.1)
+        # 加载同行业小弟
+        if industry_name:
+            co_list = [
+                lu for lu in limit_up_list
+                if lu.get("industry_name") == industry_name
+                and lu["code"] != code
+            ][:3]
+            for cp in co_list:
+                try:
+                    cp_kl = get_stock_5min_kline(cp["code"])
+                    time.sleep(0.1)
+                    if cp_kl:
+                        companions.append({
+                            "code": cp["code"], "name": cp["name"],
+                            "kline": cp_kl,
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # ── 四维详细日志 ──
+    logs = {}
+    logs["drive"] = build_drive_logs(
+        code, quote.get("name", ""), drive_result,
+        stock_5min, companions, sector_5min
+    )
+    logs["anti_drop"] = build_anti_drop_logs(anti_drop_result)
+    logs["leading"] = build_leadership_logs(leading_result)
+    logs["absorption"] = build_absorption_logs(
+        absorption_result, _INDUSTRY_CODE_TO_NAME
+    )
 
     # ── 综合评分 ──
     composite = (
@@ -164,6 +214,7 @@ def analyze_stock(code: str, verbose: bool = False) -> dict:
         "anti_drop": anti_drop_result,
         "leading": leading_result,
         "absorption": absorption_result,
+        "logs": logs,
     }
 
 
@@ -255,6 +306,17 @@ def print_report(result: dict, verbose: bool = False):
                 print(f"  回撤: {be['retrace_pct']*100:.1f}%  |  方向一致性: {be['up_bars']}/6阳")
         else:
             print(f"  ℹ️ {ab.get('breakdown',{}).get('note','无事件')}")
+    print()
+    # ── 四维详细日志 ──
+    logs = result.get("logs", {})
+    if logs:
+        for dim_key, dim_label in [("drive", "🐉 带动性"), ("anti_drop", "🛡️ 抗跌性"),
+                                    ("leading", "📊 领涨性"), ("absorption", "💰 资金承接")]:
+            lines = logs.get(dim_key, [])
+            if lines:
+                print(f"  {dim_label}:")
+                for line in lines:
+                    print(f"     {line}")
         print()
 
 
