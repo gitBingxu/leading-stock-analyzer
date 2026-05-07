@@ -4,8 +4,9 @@ description: >
   龙头战法量化分析 — 从带动性、抗跌性、领涨性、资金承接性四个维度评估涨停股的龙头质量。
   东方财富公开 API 驱动，无需登录。运行 python3 scripts/main.py 或 analyze.py 获取评分。
   使用后**原样输出终端结果，不添加任何主观评价、交易建议、角色扮演**。
-  Trigger phrases: 龙头分析、龙头战法、涨停分析、带动性、抗跌性、领涨性、资金承接、
-  这个票是不是龙头、帮我分析这只股票。
+   Trigger phrases: 龙头分析、龙头战法、涨停分析、带动性、抗跌性、领涨性、资金承接、
+   这个票是不是龙头、帮我分析这只股票、排查问题、为什么失败、为什么慢、日志分析、
+   今天运行情况、怎么看日志。
 ---
 
 # 龙头战法量化分析
@@ -90,6 +91,90 @@ python3 scripts/analyze.py 002xxx --json    # JSON 输出
     2. 买点建议：
     - xxx 后续迭代
 ```
+
+## 排查问题（日志分析）
+
+系统每次运行自动写入结构化日志到 `./logs/lsa_YYYYMMDD.jsonl`（JSON Lines，每行一条独立 JSON）。agent 排查时优先读日志而非重跑脚本。
+
+### 日志结构速查
+
+| 事件类型 | 含义 | 关键字段 |
+|---------|------|---------|
+| `session_start` | 运行开始 | `command`, `args`, `pid` |
+| `session_end` | 运行结束 | `success`, `failed`, `top_scores`, `total_elapsed_ms`(在顶层) |
+| `pipeline_stage` | 流水线阶段 | `stage`(preload/filter/rank/analyze), `elapsed_ms`(在顶层), `candidates`, `success`, `failed` |
+| `api_call` | 每次 HTTP 调用 | `name`(url), `elapsed_ms`(在顶层), `ok`, `attempts`, `reason`, `last_http_status`, `last_body_snippet` |
+| `subprocess` | 子进程分析 | `code`, `status`(ok/timeout/error/non_zero_rc/json_error), `elapsed_ms`(在顶层), `reason` |
+| `dimension_score` | 维度得分 | `code`, `dim`(drive/anti_drop/leading/absorption), `score`, `fallback` |
+| `error` | 异常 | `context`, `error_type`, `message`, `stack_summary` |
+
+注：`elapsed_ms` 在顶层而非 `meta` 中；`ok` 也在顶层。
+
+### 常用排查命令
+
+```bash
+LOG="./logs/lsa_$(date +%Y%m%d).jsonl"
+
+# 1. 一目了然：今天总体情况
+tail -1 "$LOG" | python3 -m json.tool
+
+# 2. 哪些 API 最慢（取 top 5）
+grep '"api_call"' "$LOG" | python3 -c "
+import sys, json
+calls = [json.loads(l) for l in sys.stdin]
+for c in sorted(calls, key=lambda x: x['elapsed_ms'], reverse=True)[:5]:
+    m = c['meta']
+    print(f\"{c['elapsed_ms']:>6}ms  {'OK' if c['ok'] else 'FAIL'}  {m['name'][:80]}\")
+"
+
+# 3. 失败的 API 调用及原因
+grep '"ok":false' "$LOG" | grep '"api_call"' | python3 -c "
+import sys, json
+for l in sys.stdin:
+    c = json.loads(l)
+    m = c['meta']
+    print(f\"{m['name'][:80]}\")
+    print(f\"  耗时{c['elapsed_ms']}ms  重试{m['attempts']}次  reason={m.get('reason','')[:120]}\")
+    if m.get('last_http_status') is not None:
+        print(f\"  HTTP {m['last_http_status']}\")
+    if m.get('last_body_snippet'):
+        print(f\"  body: {m['last_body_snippet'][:100]}\")
+"
+
+# 4. 子进程成功率
+grep '"subprocess"' "$LOG" | python3 -c "
+import sys, json
+total, ok, fail = 0, 0, 0
+for l in sys.stdin:
+    c = json.loads(l)
+    total += 1
+    if c['ok']: ok += 1
+    else: fail += 1
+print(f'子进程: {total} 只, 成功 {ok}, 失败 {fail}')
+"
+
+# 5. 哪些票的分是 fallback 降级分
+grep '"dimension_score"' "$LOG" | python3 -c "
+import sys, json
+for l in sys.stdin:
+    c = json.loads(l)
+    m = c['meta']
+    if m.get('fallback'):
+        print(f\"{m['code']} {m['dim']:12s} score={m['score']:.0f}  reason={m.get('reason','')[:100]}\")
+"
+```
+
+### 排查流程
+
+1. **用户说"为什么脚本失败了？"** → `tail -1 $LOG` 看 session_end 汇总；再 `grep '"error"' $LOG` 看具体错误
+2. **用户说"为什么这么慢？"** → 用命令 2 找慢 API；用命令 5 看是否有大量 fallback（说明 API 取数失败触发了耗时长等待）
+3. **用户说"为什么某票分低？"** → `grep 'dimension_score' $LOG | grep '该股票代码'` 逐维度查看
+4. **用户说"今天运行情况怎么样？"** → 做命令 1+4 给概览
+5. **日志文件不存在** → 说明脚本还没运行过，或已被清理（>7 天）；直接跑一次脚本生成新日志
+
+### 输出规则
+
+排查类问题与普通分析不同：**不需要原样输出**。排查时可以解读日志、提供结论和建议。输出格式自由，以可读为准。
 
 ## 注意事项
 
