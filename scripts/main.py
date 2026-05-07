@@ -11,7 +11,7 @@
   5. 输出报告
 
 用法:
-  python3 main.py                    # 终端输出报告（默认 top 5，候选 10）
+  python3 main.py                    # 终端输出报告（默认 top 5，候选 20）
   python3 main.py --json             # JSON 输出
   python3 main.py --top 10           # 自定义 Top N
   python3 main.py --workers 3        # 并行数（默认2，防风控）
@@ -33,7 +33,9 @@ from eastmoney_api import (
     get_stock_kline,
     infer_consecutive_boards,
     get_market_index_kline,
+    get_api_calls_and_clear,
 )
+from persist_logger import PersistLogger
 
 OUTPUT_DIR = "/tmp"
 MAX_AGE_DAYS = 3
@@ -41,24 +43,46 @@ MAX_AGE_DAYS = 3
 
 # ─── Step 0: 预加载共享数据 ──────────────────────────
 
-def _preload_shared_data():
+def _preload_shared_data(logger=None):
     """清理旧文件 + 拉取涨停榜/大盘K线 → 写 /tmp/lsa_YYYYMMDD.json。"""
     cutoff = datetime.now() - timedelta(days=MAX_AGE_DAYS)
     for f in glob.glob(os.path.join(OUTPUT_DIR, "lsa_*.json")):
         try:
             if datetime.fromtimestamp(os.path.getmtime(f)) < cutoff:
                 os.remove(f)
-                print(f"  🗑️ 清理: {f}", file=sys.stderr)
         except OSError:
             pass
 
-    print("📡 拉取涨停榜...", file=sys.stderr)
     try:
         limit_up_list = get_limit_up_list()
-        print("📈 拉取大盘K线...", file=sys.stderr)
+        api_stats = get_api_calls_and_clear()
+        if logger:
+            for s in api_stats:
+                logger.api(
+                    name="get_limit_up_list" if "clist/get" in s["url"] else s["url"],
+                    elapsed_ms=s["elapsed_ms"], ok=s["ok"],
+                    attempts=s.get("attempts", 1),
+                    reason=s.get("reason", ""),
+                    last_http_status=s.get("last_http_status"),
+                    last_body_snippet=s.get("last_body_snippet"),
+                )
+
         market_kline = get_market_index_kline("1.000001", 20)
+        api_stats = get_api_calls_and_clear()
+        if logger:
+            for s in api_stats:
+                logger.api(
+                    name="get_market_index_kline",
+                    elapsed_ms=s["elapsed_ms"], ok=s["ok"],
+                    attempts=s.get("attempts", 1),
+                    reason=s.get("reason", ""),
+                    last_http_status=s.get("last_http_status"),
+                    last_body_snippet=s.get("last_body_snippet"),
+                )
     except Exception as e:
-        print(f"❌ 拉取数据失败 ({type(e).__name__}): {e}", file=sys.stderr)
+        print(f"lsa: 拉取数据失败 ({type(e).__name__}): {e}", file=sys.stderr)
+        if logger:
+            logger.error_from_exc("preload", e)
         sys.exit(1)
 
     trading_date = datetime.now().strftime("%Y%m%d")
@@ -78,7 +102,6 @@ def _preload_shared_data():
     with open(filepath, "w") as f:
         json.dump(data, f, ensure_ascii=False, default=str)
 
-    print(f"✅ 共享数据写入: {filepath}", file=sys.stderr)
     return filepath, limit_up_list
 
 
@@ -96,21 +119,36 @@ def fetch_and_filter(limit_up_list):
             continue
         filtered.append(s)
 
-    print(f"📡 涨停榜: {len(limit_up_list)} 只 → 主板非ST: {len(filtered)} 只", file=sys.stderr)
     return filtered
 
 
 # ─── Step 2: 推算连板、排序 ──────────────────
 
-def rank_by_consecutive(stocks):
+def rank_by_consecutive(stocks, logger=None):
     """推算连板数，按连板降序排列。"""
     for s in stocks:
+        code = s["code"]
         try:
-            kl = get_stock_kline(s["code"], 20)
+            t_api = time.time()
+            kl = get_stock_kline(code, 20)
+            api_elapsed = (time.time() - t_api) * 1000
             time.sleep(0.05)
-            s["est_cons"] = infer_consecutive_boards(s["code"], kl) if kl else 1
-        except Exception:
+            s["est_cons"] = infer_consecutive_boards(code, kl) if kl else 1
+            if logger:
+                logger.api(
+                    name=f"get_stock_kline({code})",
+                    elapsed_ms=api_elapsed, ok=bool(kl),
+                    attempts=1, reason="" if kl else "empty kline",
+                )
+        except Exception as e:
+            api_elapsed = (time.time() - t_api) * 1000
             s["est_cons"] = 1
+            if logger:
+                logger.api(
+                    name=f"get_stock_kline({code})",
+                    elapsed_ms=api_elapsed, ok=False,
+                    attempts=1, reason=f"{type(e).__name__}: {e}",
+                )
 
     stocks.sort(key=lambda x: (x["est_cons"], x.get("pct", 0)), reverse=True)
     return stocks
@@ -119,7 +157,7 @@ def rank_by_consecutive(stocks):
 # ─── Step 3: 并行 subprocess 调 analyze.py ───
 
 def _run_single_analysis(code, shared_path, timeout=60):
-    """子进程调用 analyze.py --shared-data --json，返回解析后的 dict 或 None。"""
+    """子进程调用 analyze.py --shared-data --json，返回 (result_dict, status, reason)。"""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analyze.py")
     cmd = [sys.executable, script, code, "--shared-data", shared_path, "--json"]
     try:
@@ -127,23 +165,51 @@ def _run_single_analysis(code, shared_path, timeout=60):
             cmd, capture_output=True, text=True, timeout=timeout
         )
         if result.returncode != 0:
-            err = result.stderr.strip()[-300:] if result.stderr else "unknown error"
-            print(f"  ⚠️ {code} analyze.py 非零退出 (rc={result.returncode}): {err}", file=sys.stderr)
-            return None
+            reason = result.stderr.strip()[-500:] if result.stderr else "unknown error"
+            return None, "non_zero_rc", reason, result.returncode
         data = json.loads(result.stdout)
-        return data
+        return data, "ok", "", 0
     except subprocess.TimeoutExpired:
-        print(f"  ❌ {code} 分析超时 ({timeout}s)", file=sys.stderr)
-        return None
+        return None, "timeout", f"{timeout}s timeout", None
     except json.JSONDecodeError as e:
-        print(f"  ❌ {code} JSON 解析失败: {e}", file=sys.stderr)
-        return None
+        return None, "json_error", str(e), None
     except Exception as e:
-        print(f"  ❌ {code} 子进程异常 ({type(e).__name__}): {e}", file=sys.stderr)
-        return None
+        return None, "error", f"{type(e).__name__}: {e}", None
 
 
-def run_parallel(candidates, shared_path, max_workers=2):
+def _log_subprocess_scores(logger, code, data):
+    """记录子进程返回的维度得分和 API 调用打点。"""
+    for dim in ["drive", "anti_drop", "leading", "absorption"]:
+        d = data.get(dim, {})
+        score = d.get("score", 0)
+        fallback = d.get("fallback", False)
+        dim_time = data.get("_dim_times", {}).get(dim, 0)
+        reason = ""
+        if fallback:
+            bk = d.get("breakdown", {}) or {}
+            reason = bk.get("error", bk.get("note", "fallback"))
+        logger.dimension_score(code, dim, score, elapsed_ms=dim_time,
+                               fallback=fallback, reason=reason)
+
+    for s in data.get("_api_calls", []):
+        logger.api(
+            name=s.get("url", ""),
+            elapsed_ms=s["elapsed_ms"], ok=s["ok"],
+            attempts=s.get("attempts", 1),
+            reason=s.get("reason", ""),
+            last_http_status=s.get("last_http_status"),
+            last_body_snippet=s.get("last_body_snippet"),
+        )
+
+    elapsed_ms = data.get("_elapsed_ms", 0)
+    logger.subprocess(code, "ok", elapsed_ms=elapsed_ms)
+
+    for err in data.get("_errors", []):
+        ctx, msg = err[0], err[1] if len(err) > 1 else str(err)
+        logger.error(context=f"{code}/{ctx}", message=msg, error_type="SubError")
+
+
+def run_parallel(candidates, shared_path, max_workers=2, logger=None):
     """并行 subprocess 分析所有候选股。返回结果列表（已排序）。"""
     results = []
     total = len(candidates)
@@ -151,13 +217,8 @@ def run_parallel(candidates, shared_path, max_workers=2):
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
-        for i, stock in enumerate(candidates):
+        for stock in candidates:
             code = stock["code"]
-            name = stock["name"]
-            cons = cons_map.get(code, 1)
-            ind_name = stock.get("industry_name", "")
-            print(f"  [{i+1}/{total}] 启动 {code} {name} ({ind_name}) {cons}连板...",
-                  file=sys.stderr)
             futures[executor.submit(_run_single_analysis, code, shared_path)] = stock
             time.sleep(0.3)
 
@@ -167,12 +228,17 @@ def run_parallel(candidates, shared_path, max_workers=2):
             name = stock["name"]
             ind_name = stock.get("industry_name", "")
             cons = cons_map.get(code, 1)
+            t_sub = time.time()
 
             try:
-                data = future.result()
+                data, status, reason, exit_code = future.result()
             except Exception as e:
-                data = None
-                print(f"  ❌ {code} future 异常: {e}", file=sys.stderr)
+                data, status, reason, exit_code = None, "error", f"{type(e).__name__}: {e}", None
+
+            sub_elapsed = (time.time() - t_sub) * 1000
+            if logger:
+                logger.subprocess(code, status, elapsed_ms=sub_elapsed,
+                                  exit_code=exit_code, reason=reason)
 
             if data is None:
                 results.append({
@@ -188,10 +254,12 @@ def run_parallel(candidates, shared_path, max_workers=2):
                     "leading": {"score": 0},
                     "absorption": {"score": 0},
                     "logs": {},
-                    "_errors": [("分析", "子进程失败或超时")],
+                    "_errors": [("分析", reason)],
                     "_fallback": True,
                 })
             else:
+                if logger:
+                    _log_subprocess_scores(logger, code, data)
                 data["est_cons"] = data.get("est_cons", cons)
                 results.append(data)
 
@@ -253,37 +321,74 @@ def main():
 
     t_start = time.time()
 
+    logger = PersistLogger(log_dir="./logs", max_days=7)
+    logger.session_start(command="main.py", args=sys.argv[1:])
+
+    print(f"lsa: 开始分析，日志 → ./logs/lsa_{datetime.now().strftime('%Y%m%d')}.jsonl",
+          file=sys.stderr)
+
     # Step 0: 预加载共享数据
-    print("🔍 预加载共享数据...", file=sys.stderr)
-    shared_path, limit_up_list = _preload_shared_data()
+    t_stage = time.time()
+    shared_path, limit_up_list = _preload_shared_data(logger)
+    logger.stage("preload", elapsed_ms=(time.time() - t_stage) * 1000,
+                 stocks=len(limit_up_list))
+    get_api_calls_and_clear()
 
     # Step 1: 过滤
+    t_stage = time.time()
     stocks = fetch_and_filter(limit_up_list)
+    logger.stage("filter", elapsed_ms=(time.time() - t_stage) * 1000,
+                 in_count=len(limit_up_list), out_count=len(stocks))
+
     if not stocks:
-        print("⚠️ 无符合条件的涨停股", file=sys.stderr)
+        print("lsa: 无符合条件的涨停股", file=sys.stderr)
+        logger.error(context="filter", message="无符合条件的涨停股")
+        logger.session_end(total_elapsed_ms=(time.time() - t_start) * 1000,
+                           success=0, failed=0)
+        logger.close()
         sys.exit(1)
 
     # Step 2: 推算连板 + 排序
-    print("📊 推算连板数...", file=sys.stderr)
-    stocks = rank_by_consecutive(stocks)
+    t_stage = time.time()
+    stocks = rank_by_consecutive(stocks, logger)
+    get_api_calls_and_clear()
 
-    # 取前 N 候选
     candidates = stocks[:args.candidates]
+    logger.stage("rank", elapsed_ms=(time.time() - t_stage) * 1000,
+                 candidates=len(candidates),
+                 max_cons=candidates[0].get("est_cons", 1) if candidates else 0,
+                 min_cons=candidates[-1].get("est_cons", 1) if candidates else 0)
+
     if not candidates:
-        print("⚠️ 无候选股", file=sys.stderr)
+        print("lsa: 无候选股", file=sys.stderr)
+        logger.error(context="rank", message="无候选股")
+        logger.session_end(total_elapsed_ms=(time.time() - t_start) * 1000,
+                           success=0, failed=0)
+        logger.close()
         sys.exit(1)
 
-    print(f"🎯 候选池: {len(candidates)} 只 (连板 {candidates[0].get('est_cons',1)}"
-          f"→{candidates[-1].get('est_cons',1)})", file=sys.stderr)
-
     # Step 3: 并行分析
-    print(f"🐉 并行分析 ({len(candidates)} 只, workers={args.workers})...", file=sys.stderr)
-    analyzed = run_parallel(candidates, shared_path, max_workers=args.workers)
+    t_stage = time.time()
+    analyzed = run_parallel(candidates, shared_path, max_workers=args.workers, logger=logger)
+    stage_elapsed = (time.time() - t_stage) * 1000
+    success_count = sum(1 for r in analyzed if not r.get("_fallback"))
+    failed_count = len(analyzed) - success_count
+    logger.stage("analyze", elapsed_ms=stage_elapsed,
+                 candidates=len(analyzed), success=success_count, failed=failed_count)
 
     # Step 4: 取前 N
     top_n = analyzed[:args.top]
     elapsed = time.time() - t_start
-    print(f"\n✅ 完成 ({elapsed:.0f}s)", file=sys.stderr)
+    total_ms = elapsed * 1000
+
+    top_scores = [r.get("composite_score", 0) for r in top_n]
+    logger.session_end(total_elapsed_ms=total_ms,
+                       success=success_count, failed=failed_count,
+                       top_scores=[round(s, 1) for s in top_scores])
+    logger.close()
+
+    print(f"lsa: 完成 ({elapsed:.0f}s), {success_count}/{len(analyzed)} 成功",
+          file=sys.stderr)
 
     # Step 5: 输出
     if args.json:

@@ -8,6 +8,7 @@
 
 import json
 import re
+import sys
 import time
 import urllib.request
 import urllib.parse
@@ -16,17 +17,36 @@ from datetime import datetime, timedelta
 
 BASE_URL = "https://push2.eastmoney.com/api/qt"
 
+_API_CALL_LOG: list[dict] = []
+
+
+def get_api_calls_and_clear() -> list[dict]:
+    """获取并清空本进程内的 API 调用记录。"""
+    global _API_CALL_LOG
+    calls = _API_CALL_LOG
+    _API_CALL_LOG = []
+    return calls
+
+
 def _fetch(url: str, max_retries: int = 3) -> dict:
-    """带重试的 HTTP GET，自动去掉 JSONP 包装。"""
+    """带重试的 HTTP GET，自动去掉 JSONP 包装。每次调用自动记录打点。"""
+    t0 = time.time()
     last_err = None
+    last_http_status = None
+    last_body_snippet = None
+    attempts = 0
+
     for attempt in range(max_retries):
+        attempts += 1
         try:
             req = urllib.request.Request(url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Referer": "https://quote.eastmoney.com/",
             })
             with urllib.request.urlopen(req, timeout=10) as resp:
+                last_http_status = resp.status
                 raw = resp.read().decode("utf-8")
+                last_body_snippet = raw[:300]
             # 去 JSONP 包装
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if not match:
@@ -34,11 +54,37 @@ def _fetch(url: str, max_retries: int = 3) -> dict:
             data = json.loads(match.group())
             if isinstance(data, dict) and data.get("rc") is not None and data["rc"] != 0:
                 raise ValueError(f"API error rc={data.get('rc')} msg={data.get('msg','')}")
+
+            elapsed = round((time.time() - t0) * 1000, 1)
+            _API_CALL_LOG.append({
+                "url": url[:150],
+                "elapsed_ms": elapsed,
+                "ok": True,
+                "attempts": attempts,
+            })
             return data
         except Exception as e:
             last_err = e
+            if hasattr(e, "code"):
+                last_http_status = e.code
+                try:
+                    body = e.read().decode("utf-8")
+                    last_body_snippet = body[:300]
+                except Exception:
+                    pass
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (attempt + 1))
+
+    elapsed = round((time.time() - t0) * 1000, 1)
+    _API_CALL_LOG.append({
+        "url": url[:150],
+        "elapsed_ms": elapsed,
+        "ok": False,
+        "attempts": attempts,
+        "reason": f"{type(last_err).__name__}: {last_err}",
+        "last_http_status": last_http_status,
+        "last_body_snippet": last_body_snippet,
+    })
     raise RuntimeError(f"{type(last_err).__name__}: {last_err}") from last_err
 
 

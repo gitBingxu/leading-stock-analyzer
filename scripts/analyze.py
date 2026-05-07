@@ -24,6 +24,7 @@ from eastmoney_api import (
     infer_consecutive_boards,
     get_sector_5min_kline,
     get_stock_5min_kline,
+    get_api_calls_and_clear,
     _INDUSTRY_CODE_TO_NAME,
 )
 from drive_analysis import calc_drive_score
@@ -70,6 +71,9 @@ def _load_shared_data(filepath, max_age_minutes=10):
 
 def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None) -> dict:
     """对单只股票执行四维分析。"""
+
+    t_start = time.time()
+    _dim_times = {}
 
     print(f"🔍 正在分析 {code}...", file=sys.stderr)
 
@@ -131,6 +135,7 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
 
     # ── 维度一：带动性 ──
     print("  🐉 分析带动性...", file=sys.stderr)
+    t_dim = time.time()
     drive_result = {"score": 30, "breakdown": {"error": "无涨停日数据"}}
     co_limitup_map = {}
 
@@ -162,18 +167,22 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
             drive_result = {"score": 30, "breakdown": {"error": str(e)}, "fallback": True}
     else:
         industry_components = []
+    _dim_times["drive"] = round((time.time() - t_dim) * 1000, 1)
 
     # ── 维度二：抗跌性 ──
     print("  🛡️  分析抗跌性...", file=sys.stderr)
+    t_dim = time.time()
     try:
         anti_drop_result = calc_anti_drop_score(stock_kline, market_kline)
     except Exception as e:
         print(f"  ⚠️ 抗跌性分析失败 ({type(e).__name__}): {e}", file=sys.stderr)
         _errors.append(("抗跌性", f"{type(e).__name__}: {e}"))
         anti_drop_result = {"score": 50, "drop_days_count": 0, "breakdown": {"error": str(e)}, "fallback": True}
+    _dim_times["anti_drop"] = round((time.time() - t_dim) * 1000, 1)
 
     # ── 维度三：领涨性 ──
     print("  📊 分析领涨性...", file=sys.stderr)
+    t_dim = time.time()
     if not industry_components and industry_code:
         try:
             industry_components = get_industry_components(industry_code)
@@ -182,9 +191,11 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
             _errors.append(("行业成分股", f"{type(e).__name__}: {e}"))
     limit_dates = [ld.get("date", "") for ld in recent_limit_ups]
     leading_result = calc_leading_score(stock_kline, industry_components, limit_dates, code)
+    _dim_times["leading"] = round((time.time() - t_dim) * 1000, 1)
 
     # ── 维度四：资金承接性 ──
     print("  💰 分析资金承接性...", file=sys.stderr)
+    t_dim = time.time()
     absorption_result = {"score": 50, "breakdown": {"note": "无行业数据"}}
     all_sectors = {}
     if industry_code:
@@ -215,8 +226,10 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
             print(f"  ⚠️ 资金承接性分析失败 ({type(e).__name__}): {e}", file=sys.stderr)
             _errors.append(("资金承接性", f"{type(e).__name__}: {e}"))
             absorption_result = {"score": 50, "breakdown": {"error": str(e)}, "fallback": True}
+    _dim_times["absorption"] = round((time.time() - t_dim) * 1000, 1)
 
     # ── 5分钟K线数据（用于详细日志）──
+    t_dim = time.time()
     stock_5min = []
     companions = []
     sector_5min = all_sectors.get(industry_code, []) if industry_code else []
@@ -245,6 +258,7 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
                     continue
     except Exception as e:
         print(f"  ⚠️ 5分钟K线加载失败 ({type(e).__name__}): {e}", file=sys.stderr)
+    _dim_times["5min_kline"] = round((time.time() - t_dim) * 1000, 1)
 
     # ── 四维叙事日志 ──
     logs = {}
@@ -296,6 +310,9 @@ def analyze_stock(code: str, verbose: bool = False, shared_data_file: str = None
         "logs": logs,
         "_errors": _errors,
         "_fallback": len(_errors) > 0,
+        "_elapsed_ms": round((time.time() - t_start) * 1000, 1),
+        "_dim_times": _dim_times,
+        "_api_calls": get_api_calls_and_clear(),
     }
 
 

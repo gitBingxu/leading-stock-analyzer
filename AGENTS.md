@@ -49,6 +49,7 @@ analyze.py (单票子进程, 60s 超时)
 | `scripts/leadership.py` | 133 | 维度三：领涨性（行业排名 + 历史估计排名） |
 | `scripts/absorption.py` | 146 | 维度四：资金承接性（跨板块虹吸事件检测） |
 | `scripts/log_builder.py` | 273 | 四维日志文本生成 |
+| `scripts/persist_logger.py` | ~150 | JSON Lines 持久化打点（每日滚动、线程安全、写入失败静默降级） |
 | `scripts/preload.py` | ~50 | 共享数据预加载，输出 JSON 路径到 stdout |
 | `references/api_reference.md` | — | 东方财富 API 字段文档 |
 
@@ -56,7 +57,8 @@ analyze.py (单票子进程, 60s 超时)
 
 | 函数 | 行号 | 签名 | 说明 |
 |------|------|------|------|
-| `_fetch` | 19 | `(url, max_retries=3) -> dict` | 统一 HTTP GET，自动去 JSONP 包装、3 次重试（0.5s/1.0s/1.5s）、检查 rc 错误码 |
+| `_fetch` | 19 | `(url, max_retries=3) -> dict` | 统一 HTTP GET，自动去 JSONP 包装、3 次重试（0.5s/1.0s/1.5s）、检查 rc 错误码。**每次调用自动记录到 `_API_CALL_LOG`** |
+| `get_api_calls_and_clear` | 22 | `() -> list[dict]` | 获取并清空本进程的 API 调用记录。每次记录含 `{url, elapsed_ms, ok, attempts, reason, last_http_status, last_body_snippet}` |
 | `get_limit_up_list` | 47 | `(date=None) -> list[dict]` | 涨停榜，返回 `[{code, name, pct, date, board_time, consecutive, industry_name, industry_code, turnover, amount}]` |
 | `infer_consecutive_boards` | 125 | `(code, kline) -> int` | 从 K 线推算连板数，阈值主板 9.5%、双创 19.9% |
 | `get_industry_components` | 309 | `(industry_code_or_name) -> list[dict]` | 行业成分股列表，自动补全 BK 前缀 |
