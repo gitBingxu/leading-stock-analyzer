@@ -179,6 +179,41 @@ for l in sys.stdin:
 ## 注意事项
 
 1. 东方财富 API 为公开接口，不承诺 SLA，高峰期可能超时
-2. 板块 5 分钟 K 线加载全量板块时较慢（~10s），建议仅在需要时调用
-3. 领涨性分析依赖行业成分股数据，无法获取时使用简化的涨幅偏离度估算
-4. 科创板、北交所涨跌幅阈值可能超过 10%，涨停判定已做 9.9% 兜底
+2. 东财 `push2his` K 线 API 已全线封禁（rc=102），5 分钟 K 线已改为**雪球优先 + 新浪兜底**双源架构
+3. 板块 5 分钟 K 线通过成分股 Top 3 合成（等权平均），无需直接查询板块指数 API
+4. 领涨性分析依赖行业成分股数据，无法获取时使用简化的涨幅偏离度估算
+5. 科创板、北交所涨跌幅阈值可能超过 10%，涨停判定已做 9.9% 兜底
+
+## Cookie 管理（雪球 API）
+
+数据源优先使用雪球，需要浏览器 cookie 才能访问。Cookie 过期后自动回退到新浪财经。
+
+### Agent 处理流程
+
+当用户运行分析脚本且 cookie 失效时，agent 应：
+
+1. **告知用户** cookie 已失效，雪球 API 不可用，当前回退到新浪财经作为备用数据源
+2. **提供两个选项**：
+   - 选项一：用户手动从浏览器复制 cookie 提供给 agent，agent 写入 `~/.lsa_xq_cookies`
+   - 选项二：执行 `python3 scripts/xq_cookie_refresh.py --playwright` 自动获取（需要 `pip install playwright && playwright install chromium`）
+3. **用户选一**：agent 将用户提供的 cookie 字符串原样写入 `~/.lsa_xq_cookies`
+4. **用户选二**：agent 先检查 Playwright 是否已安装，如未安装则安装，再执行刷新脚本
+
+### Cookie 提取方法（给用户看）
+
+在浏览器中：
+1. 打开 https://xueqiu.com 并登录
+2. F12 → Network → 刷新页面 → 右键任意 `stock.xueqiu.com` 请求 → Copy → Copy as cURL
+3. 从中提取 `-b '...'` 部分（即完整 Cookie 请求头）
+
+### 检查 Cookie 状态
+
+```bash
+python3 scripts/xq_cookie_refresh.py --status
+```
+
+### 手动刷新
+
+```bash
+python3 scripts/xq_cookie_refresh.py --manual "xq_a_token=xxx; xq_id_token=eyJ...; ..."
+```

@@ -602,11 +602,33 @@ def _get_quote_tencent(code: str) -> dict:
 
 def get_sector_5min_kline(industry_code: str, bars: int = 48) -> list[dict]:
     """
-    获取板块指数 5 分钟 K 线（优先尝试东方财富，失败返回空）。
+    获取板块指数 5 分钟 K 线。
+    策略：取板块内成分股的 5 分钟 K 线合成板块走势（成分股合成法），
+    解决东财 push2his K 线 API 封杀问题。
     industry_code: "BK0429"
     bars: 默认 48（一天 4h × 12 根/小时）
     返回: [{"time":"0935","open":...,"close":...,"high":...,"low":...,"volume":...,"amount":...}, ...]
     """
+    # ① 合成板块 K 线：取成分股 Top 3 的 5 分钟 K 线等权平均
+    try:
+        components = get_industry_components(industry_code)
+        if components:
+            components.sort(key=lambda c: c.get("amount", 0) or 0, reverse=True)
+            top_codes = [c["code"] for c in components[:3] if c.get("code")]
+            if top_codes:
+                component_bars = []
+                for tc in top_codes:
+                    kl = get_stock_5min_kline(tc, bars)
+                    if kl and len(kl) >= min(10, bars):
+                        component_bars.append(kl)
+                if len(component_bars) >= 1:
+                    synthesized = _synthesize_sector_bars(component_bars, bars)
+                    if synthesized:
+                        return synthesized
+    except Exception as e:
+        print(f"  ⚠️ 板块 {industry_code} 合成K线失败 ({type(e).__name__})", file=sys.stderr)
+
+    # ② 兜底：东财（目前通常返回 rc=102，但保留接口）
     secid = f"90.{industry_code}"
     params = {
         "secid": secid,
@@ -641,15 +663,75 @@ def get_sector_5min_kline(industry_code: str, bars: int = 48) -> list[dict]:
     return results
 
 
+def _synthesize_sector_bars(component_bars_list: list[list[dict]], max_bars: int) -> list[dict]:
+    """
+    将多只成分股的 5 分钟 K 线按时间对齐后等权平均，合成板块 K 线。
+    component_bars_list: [[{time,open,close,...}, ...], [{...}, ...], ...]
+    """
+    if not component_bars_list:
+        return []
+
+    time_slots = list(dict.fromkeys(
+        b["time"] for bars in component_bars_list for b in bars
+    ))
+
+    results = []
+    for ts in time_slots:
+        opens, highs, lows, closes, volumes, amounts = [], [], [], [], [], []
+        for bars in component_bars_list:
+            matched = [b for b in bars if b["time"] == ts]
+            if not matched:
+                continue
+            b = matched[0]
+            opens.append(b["open"])
+            highs.append(b["high"])
+            lows.append(b["low"])
+            closes.append(b["close"])
+            volumes.append(b.get("volume", 0) or 0)
+            amounts.append(b.get("amount", 0) or 0)
+
+        if not opens:
+            continue
+
+        results.append({
+            "time": ts,
+            "open": sum(opens) / len(opens),
+            "high": max(highs),
+            "low": min(lows),
+            "close": sum(closes) / len(closes),
+            "volume": sum(volumes),
+            "amount": sum(amounts),
+        })
+
+    if len(results) > max_bars:
+        results = results[-max_bars:]
+    return results
+
+
 # ─── 个股 5 分钟 K 线 ────────────────────────────────────
 
 def get_stock_5min_kline(code: str, bars: int = 48) -> list[dict]:
     """
-    获取个股 5 分钟 K 线。
+    获取个股 5 分钟 K 线（多源 fallback：雪球 → 新浪 → 东财）。
     code: "002192" 或 "600519"
     bars: 默认 48（一天 4h × 12 根/小时）
     返回: [{"time":"0935","open":...,"close":...,"high":...,"low":...,"volume":...,"amount":...}, ...]
     """
+    # ① 雪球（需 cookie，路径最优先）
+    try:
+        from xueqiu_api import get_stock_5min as _xq_5min
+        result = _xq_5min(code, bars)
+        if result and len(result) >= min(10, bars):
+            return result
+    except Exception:
+        pass
+
+    # ② 新浪财经（无需 login，稳定性高）
+    result = _get_stock_5min_sina(code, bars)
+    if result and len(result) >= min(10, bars):
+        return result
+
+    # ③ 东方财富（目前 push2his 返回 rc=102，但保留兜底）
     market = _get_market(code)
     secid = f"{market}.{code}"
     params = {
@@ -682,6 +764,55 @@ def get_stock_5min_kline(code: str, bars: int = 48) -> list[dict]:
             "volume":float(parts[5]),
             "amount":float(parts[6]),
         })
+    return results
+
+
+def _get_stock_5min_sina(code: str, bars: int = 48) -> list[dict]:
+    """
+    从新浪财经获取个股 5 分钟 K 线。
+    code: "002192" 或 "600519"
+    """
+    prefix = "sh" if code.startswith(("6", "9")) else "sz"
+    symbol = f"{prefix}{code}"
+    url = (f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           f"CN_MarketData.getKLineData?symbol={symbol}&scale=5&ma=no&datalen={bars}")
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+    except Exception:
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    results = []
+    for item in data:
+        try:
+            day = item.get("day", "")
+            # Sina format: "2026-05-08 14:01:00" → "1401"
+            if " " in day:
+                hms = day.split(" ")[1]  # "14:01:00"
+                time_str = hms.replace(":", "")[:4]  # "1401"
+            else:
+                time_str = ""
+            results.append({
+                "time": time_str,
+                "open": float(item.get("open", 0)),
+                "high": float(item.get("high", 0)),
+                "low": float(item.get("low", 0)),
+                "close": float(item.get("close", 0)),
+                "volume": float(item.get("volume", 0)),
+                "amount": 0,
+            })
+        except (ValueError, TypeError):
+            continue
+
+    if len(results) > bars:
+        results = results[-bars:]
     return results
 
 

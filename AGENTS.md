@@ -5,7 +5,7 @@ A 股龙头战法四维量化筛选工具。纯 Python 3 标准库，零外部�
 ## 项目概览
 
 - **目的**：从涨停股中量化识别"真龙头"，评估能力（带动板块）、抗跌能力（大盘跳水时表现）、领涨能力（行业排名）、资金承接（跨板块虹吸）
-- **数据源**：东方财富 + 腾讯公开 JSONP API，无需登录
+- **数据源**：雪球（优先）+ 新浪财经（兜底）+ 东方财富（辅助）+ 腾讯（日K线），无需登录。东财 push2his K 线 API 已封禁
 - **入口**：`python3 scripts/main.py`（批量筛选）、`python3 scripts/analyze.py <code>`（单票分析）
 - **无测试/无 lint/无 build**：直接 `python3` 运行即可
 
@@ -41,7 +41,9 @@ analyze.py (单票子进程, 60s 超时)
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `scripts/eastmoney_api.py` | 781 | 所有 HTTP 调用：涨停榜、K 线、行情、成分股、板块 5-min K 线 |
+| `scripts/eastmoney_api.py` | 781+ | 所有 HTTP 调用：涨停榜、K 线、行情、成分股。5-min K 线多源 fallback（雪球→新浪→东财） |
+| `scripts/xueqiu_api.py` | ~180 | 雪球 API 客户端：5 分钟 K 线、日 K 线、cookie 管理、数据归一化 |
+| `scripts/xq_cookie_refresh.py` | ~100 | Cookie 刷新工具：手动/Playwright/状态检查 |
 | `scripts/main.py` | 296 | 批量筛选编排、subprocess 并行调度 |
 | `scripts/analyze.py` | 443 | 单票四维分析、综合评分、结果打印 |
 | `scripts/drive_analysis.py` | 173 | 维度一：带动性（板块共鸣/跟风/封板决策力） |
@@ -127,8 +129,10 @@ ABSORPTION_W = 0.25  # 资金承接性
 1. **连板 off-by-one**：最近一次修复在 `eastmoney_api.py:132`。`cons` 初始化为 1（已计最近一天），循环必须从 `len(kline)-2`（倒数第二天）开始，而非 `len(kline)-1`，否则最近一天重复计数
 2. **非交易时段**：5-min K 线为空时，资金承接性直接返回 50 分（`absorption.py:31-42`），需检查是否有数据
 3. **大盘跳水判定**：`anti_drop.py:27` 阈值为 `market_pct < -0.7%`，太宽容会导致误判太多"跳水日"。如大盘连续小跌但均 <0.7% 不会触发抗跌分析
-4. **双源 API 稳定性**：腾讯 K 线 API 偶尔静默出错返回涨跌幅为 0，`get_stock_kline()` 会触发东方财富 fallback
-5. **共享数据时效**：`analyze.py:41` 要求共享数据 mtime < 10 分钟，超时则每个子进程独立抓取
-6. **subprocess 超时**：单票 60s 超时（`main.py:121`），全量 50 个板块 5-min K 线加载是瓶颈
-7. **K 线日期顺序**：日 K 线按时间正序排列（`[0]` 最早），`infer_consecutive_boards()` 从末尾 `[-1]` 往回走
-8. **输出格式硬约束**：SKILL.md 要求 agent 原样输出终端内容，禁止自行总结或添加评价。修改 `print_results()` 时不要破坏模板格式
+4. **东财 push2his K 线全线封禁**：`push2his.eastmoney.com` 返回 rc=102，5 分钟 K 线已改为雪球优先+新浪兜底。日 K 线不受影响（腾讯优先+东财兜底）
+5. **雪球 cookie 过期**：`~/.lsa_xq_cookies` 约 25 天过期，过期后自动回退到新浪财经。用户可通过 `python3 scripts/xq_cookie_refresh.py --status` 检查状态
+6. **板块 5 分钟 K 线合成**：通过成分股 Top 3 等权平均生成，不再依赖东财板块指数 API
+7. **共享数据时效**：`analyze.py:41` 要求共享数据 mtime < 10 分钟，超时则每个子进程独立抓取
+8. **subprocess 超时**：单票 60s 超时（`main.py:121`），全量 50 个板块 5-min K 线加载是瓶颈
+9. **K 线日期顺序**：日 K 线按时间正序排列（`[0]` 最早），`infer_consecutive_boards()` 从末尾 `[-1]` 往回走
+10. **输出格式硬约束**：SKILL.md 要求 agent 原样输出终端内容，禁止自行总结或添加评价。修改 `print_results()` 时不要破坏模板格式

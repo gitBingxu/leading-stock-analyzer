@@ -6,7 +6,8 @@
 
 - Python 3.8+
 - 无需安装任何依赖（`pip install` / `requirements.txt` 都不需要）
-- 无需注册/登录，数据来自东方财富公开接口
+- 无需注册/登录，数据来自东方财富、腾讯、雪球、新浪财经公开接口
+- **推荐** 将雪球浏览器 cookie 写入 `~/.lsa_xq_cookies` 以获得最佳效果（5 分钟 K 线），不设置也可正常运行（自动回退到新浪财经）
 
 ```bash
 git clone https://github.com/gitBingxu/leading-stock-analyzer.git
@@ -87,9 +88,10 @@ python3 scripts/main.py --workers 1        # 串行模式，API 风控友好
 
 **开盘期间跑得很慢甚至失败？**
 
-东方财富公开接口不承诺 SLA，高峰期压力大。系统内置 3 次重试 + 双数据源备用（腾讯/东方财富互备），但极端情况下仍可能超时。建议：
+东方财富公开接口不承诺 SLA，高峰期压力大。系统内置 3 次重试 + 多数据源备用（雪球→新浪→东方财富），但极端情况下仍可能超时。建议：
 - 非高峰期（如收盘后 1 小时）运行，稳定性更高
 - 如必须盘中跑，调小 `--candidates` 和 `--workers 1` 降低并发压力
+- 配置雪球 cookie（`~/.lsa_xq_cookies`）可大幅提升 5 分钟 K 线稳定性，详见 [Cookie 管理](#cookie-管理)
 
 **怎么看今天跑得怎么样？**
 
@@ -107,9 +109,40 @@ tail -1 ./logs/lsa_$(date +%Y%m%d).jsonl | python3 -m json.tool
 - 含 "ST" 的股票 — 风险警示股，自动跳过
 - 只分析涨停股，当天没涨停的不在候选池
 
+**资金承接性为什么总是 50 分？**
+
+说明近期未检测到"其他板块跳水 + 本板块拉升"的跨板块虹吸事件，或 5 分钟 K 线数据源暂时不可用。配置雪球 cookie 可提升数据稳定性。
+
 **数据准确吗？**
 
-涨停榜、K 线、实时行情全部来自东方财富和腾讯公开接口，与行情软件数据源一致。价格、涨跌幅、封板时间均为接口直出，未经篡改。
+涨停榜、K 线、实时行情全部来自公开接口（东方财富、腾讯、雪球、新浪财经），与行情软件数据源一致。价格、涨跌幅、封板时间均为接口直出，未经篡改。
+
+## Cookie 管理
+
+数据源优先使用雪球，需浏览器 cookie 才能访问 5 分钟 K 线。Cookie 过期后自动回退到新浪财经。
+
+### 设置 Cookie（推荐）
+
+1. 浏览器打开 https://xueqiu.com 并登录
+2. F12 → Network → 刷新 → 右键任一 `stock.xueqiu.com` 请求 → Copy → Copy as cURL
+3. 从中提取 `-b '...'` 部分（Cookie 字符串），执行：
+
+```bash
+python3 scripts/xq_cookie_refresh.py --manual "你的cookie字符串"
+```
+
+### 检查状态
+
+```bash
+python3 scripts/xq_cookie_refresh.py --status
+```
+
+### 自动获取（需 Playwright）
+
+```bash
+pip install playwright && playwright install chromium
+python3 scripts/xq_cookie_refresh.py --playwright
+```
 
 ## 日志排查
 
