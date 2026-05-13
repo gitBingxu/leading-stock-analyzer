@@ -1,138 +1,191 @@
 # AGENTS.md
 
-A 股龙头战法四维量化筛选工具。纯 Python 3 标准库，零外部依赖。
+A 股龙头战法四维量化筛选工具。基于 [dragon-quant](https://pypi.org/project/dragon-quant/) pip 包，零配置。
 
 ## 项目概览
 
-- **目的**：从涨停股中量化识别"真龙头"，评估能力（带动板块）、抗跌能力（大盘跳水时表现）、领涨能力（行业排名）、资金承接（跨板块虹吸）
-- **数据源**：雪球（优先）+ 新浪财经（兜底）+ 东方财富（辅助）+ 腾讯（日K线），无需登录。东财 push2his K 线 API 已封禁
-- **入口**：`python3 scripts/main.py`（批量筛选）、`python3 scripts/analyze.py <code>`（单票分析）
-- **无测试/无 lint/无 build**：直接 `python3` 运行即可
+- **目的**：从涨停股中量化识别"真龙头"，评估带动能力（带动板块）、抗跌能力（大盘跳水时表现）、领涨能力（行业排名）、资金承接（跨板块虹吸）
+- **数据源**：东方财富 + 雪球 + 腾讯，无需登录
+- **入口**：`dragon-quant scan`（CLI）或 `dragon_quant.scan()`（Python API）
+- **安装**：`pip install dragon-quant`
 
 ## 运行命令
 
 ```bash
-python3 scripts/main.py                     # 默认 top 5，候选 20，2 并发
-python3 scripts/main.py --top 10 --json     # JSON 输出前 10
-python3 scripts/main.py --workers 1         # 串行模式（防风控）
-python3 scripts/analyze.py 002192           # 单票分析
-python3 scripts/analyze.py 002192 -v -j     # 详细 + JSON
-python3 scripts/preload.py                  # 独立预加载共享数据到 /tmp
+dragon-quant scan                               # 默认 top 25，候选 5，2 并发
+dragon-quant scan --top 10                      # 输出前 10
+dragon-quant scan --workers 1                   # 串行模式（防风控）
+
+# 日志查询
+dragon-quant logs tail -n 20                    # 最近 20 条日志
+dragon-quant logs summary                       # 最新扫描摘要
+dragon-quant logs query --code 600172           # 按股票代码查日志
+dragon-quant logs clear --days 7                # 清除 7 天前日志
+
+# 数据查询
+dragon-quant data sector                        # 板块涨幅榜
+dragon-quant data components --sector BK0487    # 板块成分股
+dragon-quant data kline --code 600172           # 个股日K线
+dragon-quant data quote --code 600172           # 实时行情
+
+# Cookie 管理
+dragon-quant data cookie-status                 # 检查 Cookie 状态
+dragon-quant data cookie-fetch                  # 刷新全部 Cookie
 ```
 
 ## 架构
 
 ```
-main.py (编排器)
- ├─ Step 0: preload 共享数据 → /tmp/lsa_YYYYMMDD.json（自动清理 >3 天旧文件）
- ├─ Step 1: 过滤 30*/68* 开头股 + ST 股
- ├─ Step 2: 推算连板数 → 按连板降序取前 --candidates 只
- ├─ Step 3: subprocess.run(analyze.py --shared-data) 并行分析（ThreadPoolExecutor）
- └─ Step 4: 按 composite_score 排序 → 输出 Top N
-
-analyze.py (单票子进程, 60s 超时)
- ├─ 复用共享数据（验证 10 分钟内有效），失效时回退实时抓取
- ├─ 四维评分：带动性(35%)+抗跌性(15%)+领涨性(25%)+资金承接(25%)
- ├─ 加载 5-min K 线（个股+板块+同伴股）用于日志
- └─ 输出 JSON 到 stdout（terminal 模式时有格式化报告）
+dragon_quant/
+├── __init__.py          # 公共 API 导出（scan, data, logging）
+├── cli.py               # CLI 命令（scan/logs/data/storage）
+├── orchestrator.py      # 编排器（Phase A→F 全流程）
+├── data.py              # 原子数据查询 API
+├── providers/           # 数据源适配器
+│   ├── base.py          # StockProvider 抽象接口
+│   ├── eastmoney.py     # 东方财富
+│   ├── xueqiu.py        # 雪球
+│   └── tencent.py       # 腾讯
+├── scorers/             # 四维评分器
+│   ├── drive.py         # 带动性
+│   ├── anti_drop.py     # 抗跌性
+│   ├── leadership.py    # 领涨性
+│   └── absorption.py    # 资金承接
+├── cache/               # 内存+本地双缓存
+├── logging/             # ScanLogger + ReportBuilder + 查询 API
+├── storage/             # 数据目录管理
+├── rate_limit.py        # 并发限流器
+└── models/types.py      # 数据模型
 ```
 
-## 关键文件
+## Programmatic API
 
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `scripts/eastmoney_api.py` | 781+ | 所有 HTTP 调用：涨停榜、K 线、行情、成分股。5-min K 线多源 fallback（雪球→新浪→东财） |
-| `scripts/xueqiu_api.py` | ~180 | 雪球 API 客户端：5 分钟 K 线、日 K 线、cookie 管理、数据归一化 |
-| `scripts/xq_cookie_refresh.py` | ~100 | Cookie 刷新工具：手动/Playwright/状态检查 |
-| `scripts/main.py` | 296 | 批量筛选编排、subprocess 并行调度 |
-| `scripts/analyze.py` | 443 | 单票四维分析、综合评分、结果打印 |
-| `scripts/drive_analysis.py` | 173 | 维度一：带动性（板块共鸣/跟风/封板决策力） |
-| `scripts/anti_drop.py` | 204 | 维度二：抗跌性（跳水日超额收益/日内支撑/反弹弹性） |
-| `scripts/leadership.py` | 133 | 维度三：领涨性（行业排名 + 历史估计排名） |
-| `scripts/absorption.py` | 146 | 维度四：资金承接性（跨板块虹吸事件检测） |
-| `scripts/log_builder.py` | 273 | 四维日志文本生成 |
-| `scripts/persist_logger.py` | ~150 | JSON Lines 持久化打点（每日滚动、线程安全、写入失败静默降级） |
-| `scripts/preload.py` | ~50 | 共享数据预加载，输出 JSON 路径到 stdout |
-| `references/api_reference.md` | — | 东方财富 API 字段文档 |
+### 编排器
 
-## eastmoney_api.py 核心函数
+```python
+import dragon_quant
 
-| 函数 | 行号 | 签名 | 说明 |
-|------|------|------|------|
-| `_fetch` | 19 | `(url, max_retries=3) -> dict` | 统一 HTTP GET，自动去 JSONP 包装、3 次重试（0.5s/1.0s/1.5s）、检查 rc 错误码。**每次调用自动记录到 `_API_CALL_LOG`** |
-| `get_api_calls_and_clear` | 22 | `() -> list[dict]` | 获取并清空本进程的 API 调用记录。每次记录含 `{url, elapsed_ms, ok, attempts, reason, last_http_status, last_body_snippet}` |
-| `get_limit_up_list` | 47 | `(date=None) -> list[dict]` | 涨停榜，返回 `[{code, name, pct, date, board_time, consecutive, industry_name, industry_code, turnover, amount}]` |
-| `infer_consecutive_boards` | 125 | `(code, kline) -> int` | 从 K 线推算连板数，阈值主板 9.5%、双创 19.9% |
-| `get_industry_components` | 309 | `(industry_code_or_name) -> list[dict]` | 行业成分股列表，自动补全 BK 前缀 |
-| `get_stock_kline` | 355 | `(code, days=20) -> list[dict]` | 日 K 线，腾讯优先 → 东方财富备用 |
-| `get_stock_quote` | 479 | `(code) -> dict` | 实时行情，东方财富优先 → 腾讯备用。价格需 /100 |
-| `get_sector_5min_kline` | 557 | `(industry_code, bars=48) -> list[dict]` | 板块 5 分钟 K 线 |
-| `get_stock_5min_kline` | 600 | `(code, bars=48) -> list[dict]` | 个股 5 分钟 K 线 |
-| `get_market_index_kline` | 713 | `(index_code="1.000001", days=20) -> list[dict]` | 大盘指数日 K 线 |
-| `get_all_active_sector_5min` | 658 | `() -> dict[str, list[dict]]` | 50+ 活跃板块 5-min K 线批量加载 |
-| `get_stock_concept_map` | 243 | `(limit_up_list, candidate_codes) -> dict` | 将涨停股映射到概念板块 |
+result = dragon_quant.scan(top_n=5, candidates_n=5, workers=2)
+# 返回 dict:
+# {
+#   "timestamp": "20260513_160000",
+#   "elapsed_s": 38.2,
+#   "sectors": {"up": [...], "down": [...]},
+#   "ranking": [
+#     {
+#       "code": "600172", "name": "黄河旋风",
+#       "concepts": ["培育钻石"], "board_count": 3,
+#       "composite_score": 71.8,
+#       "dimensions": {
+#         "drive": {"score": 99.0, "weight": 0.35, "details": {...}},
+#         "anti_drop": {"score": 61.0, "weight": 0.15, "details": {...}},
+#         "leadership": {"score": 50.0, "weight": 0.25, "details": {...}},
+#         "absorption": {"score": 62.0, "weight": 0.25, "details": {...}},
+#       }
+#     },
+#     ...
+#   ],
+#   "api_stats": {...},
+#   "report_text": "..."
+# }
+```
+
+### 原子数据查询
+
+```python
+from dragon_quant.data import (
+    get_sector_ranking, get_sector_components, get_kline,
+    get_minute_kline, get_quote, batch_get_quotes,
+    cookie_status, fetch_cookies,
+)
+
+sectors = get_sector_ranking()                 # 板块涨幅榜
+stocks = get_sector_components("BK0487")       # 板块成分股
+kline = get_kline("600172", source="xueqiu")   # 个股日K线
+mline = get_minute_kline("600172")             # 1分K线
+quote = get_quote("600172")                    # 实时行情
+quotes = batch_get_quotes(["600172", "000001"]) # 批量行情
+
+status = cookie_status()                       # Cookie 状态
+fetch_cookies()                                # 刷新 cookie
+```
+
+### 日志查询
+
+```python
+from dragon_quant.logging.query import (
+    tail_logs, query_logs, clear_logs, list_logs, log_summary,
+)
+
+entries = tail_logs(20)                        # 最近 20 条
+errors = query_logs(level="error")             # 按级别查
+drive = query_logs(category="scorer:drive", code="600172")
+summary = log_summary()                        # 扫描摘要
+files = list_logs()                            # 列出日志文件
+result = clear_logs(days=7)                    # 清理旧日志
+```
 
 ## 关键权重与阈值
 
 ```python
-# 综合评分权重 (analyze.py:267-270)
+# 综合评分权重
 DRIVE_W = 0.35       # 带动性
 ANTI_DROP_W = 0.15   # 抗跌性
 LEADING_W = 0.25     # 领涨性
 ABSORPTION_W = 0.25  # 资金承接性
 
-# 评级阈值 (analyze.py:274-280)
+# 评级阈值
 ≥85: 🐉 真龙
 ≥70: ⭐ 强票
 ≥50: 📊 中规中矩
 <50: 🐔 杂毛
 
-# 带动性子维度 (drive_analysis.py)
+# 带动性子维度
 板块共鸣(Voice): 30%  — 同板块涨停占比 / 10% * 100
 跟风(Follow):   30%  — 非涨停股涨幅>3%占比 / 15% * 100
 决策力(Board):  40%  — 排序位次(25%) + 绝对时间(25%) + 跟风间距(50%)，一字板×0.85
 
-# 抗跌性子维度 (anti_drop.py)
+# 抗跌性子维度
 相对回撤(A): 40%  — 个股超额收益 vs 大盘
 日内支撑(B): 30%  — 下影线 + 收盘位置，惩罚最大日内跌幅
 反弹弹性(C): 30%  — 次日 alpha = 个股涨幅 - 大盘涨幅
 
-# 资金承接事件检测 (absorption.py:66-117)
+# 资金承接事件检测
 滑动窗口 6 根 bar(30min)，同时满足：
 - ≥2 个其他板块跌 >1%
 - 目标板块涨 >0.3%
 - ≥4/6 bar 为阳线
 - 回撤 <30% 窗口涨幅
 
-# 连板推算 (eastmoney_api.py:130)
-主板 9.5%，双创 19.9%
-
 # 过滤规则
 排除 30*/68* 开头（双创），排除名称含 ST（大小写不敏感）
 ```
+
+## 数据源映射
+
+| 数据源 | 用途 | 接口数 |
+|--------|------|--------|
+| 东方财富 | 板块排行、成分股、板块 5 分 K | 3 |
+| 雪球 | 日 K 线、1 分 K 线 | 2 |
+| 腾讯 | 实时行情、批量行情 | 2 |
 
 ## 代码约定
 
 1. **输出流**：进度/错误 → `sys.stderr`，结果 JSON → `sys.stdout`
 2. **错误处理**：所有 HTTP 调用 try/except，失败返回空默认值（`[]`、score `50` 或 `0`），不抛出
-3. **速率限制**：API 调用间 sleep 0.05-0.3s，subprocess 间 0.3s 间隔
-4. **私有函数** `_` 前缀，模块顶部有中文 docstring，分隔线 `# ───`
-5. **API 双源策略**：K 线用腾讯（更稳），行情用东方财富（更全），互相 fallback
-6. **东方财富价格整数**：所有来自 Eastmoney 的价格字段需 `/100`
-7. **JSONP 去包装**：`_fetch()` 内 `re.search(r"\{.*\}", raw, re.DOTALL)` 提取纯 JSON
-8. **全局延迟加载**：行业映射 `_INDUSTRY_NAME_TO_CODE`、概念映射 `_CONCEPT_CODE_TO_NAME` 首次调用时自动加载
-9. **三字股名去空格**：东方财富会在线名中间加空格（如 `贵 州 茅 台`→`贵州茅台`），`_clean_name()` 处理
-10. **提交信息**用中文，Conventional Commits 前缀（`feat:`/`fix:`/`docs:`/`refactor:`）
+3. **速率限制**：`RateLimiter` 按 `(provider, endpoint)` 维度串行，不同 key 并发
+4. **Provider 抽象**：所有数据源实现 `StockProvider` 接口，评分器只依赖接口
+5. **懒加载**：Provider 单例延迟初始化，模块 import 不触发网络请求
+6. **结构化日志**：`ScanLogger` 全链路打点，每次扫描自动保存 JSONL + JSON + 文本报告
+7. **结果持久化**：写入 `~/Library/Application Support/dragon-quant/`，保留最新快照
 
 ## 已知坑点
 
-1. **连板 off-by-one**：最近一次修复在 `eastmoney_api.py:132`。`cons` 初始化为 1（已计最近一天），循环必须从 `len(kline)-2`（倒数第二天）开始，而非 `len(kline)-1`，否则最近一天重复计数
-2. **非交易时段**：5-min K 线为空时，资金承接性直接返回 50 分（`absorption.py:31-42`），需检查是否有数据
-3. **大盘跳水判定**：`anti_drop.py:27` 阈值为 `market_pct < -0.7%`，太宽容会导致误判太多"跳水日"。如大盘连续小跌但均 <0.7% 不会触发抗跌分析
-4. **东财 push2his K 线全线封禁**：`push2his.eastmoney.com` 返回 rc=102，5 分钟 K 线已改为雪球优先+新浪兜底。日 K 线不受影响（腾讯优先+东财兜底）
-5. **雪球 cookie 过期**：`~/.lsa_xq_cookies` 约 25 天过期，过期后自动回退到新浪财经。用户可通过 `python3 scripts/xq_cookie_refresh.py --status` 检查状态
-6. **板块 5 分钟 K 线合成**：通过成分股 Top 3 等权平均生成，不再依赖东财板块指数 API
-7. **共享数据时效**：`analyze.py:41` 要求共享数据 mtime < 10 分钟，超时则每个子进程独立抓取
-8. **subprocess 超时**：单票 60s 超时（`main.py:121`），全量 50 个板块 5-min K 线加载是瓶颈
-9. **K 线日期顺序**：日 K 线按时间正序排列（`[0]` 最早），`infer_consecutive_boards()` 从末尾 `[-1]` 往回走
-10. **输出格式硬约束**：SKILL.md 要求 agent 原样输出终端内容，禁止自行总结或添加评价。修改 `print_results()` 时不要破坏模板格式
+1. **非交易时段**：5-min K 线为空时，资金承接性直接返回 50 分，需检查是否有数据
+2. **大盘跳水判定**：`anti_drop` 阈值为 `market_pct < -0.7%`，太宽容会导致误判太多"跳水日"
+3. **雪球 cookie 过期**：约 25 天过期，过期后自动回退。通过 `dragon-quant data cookie-status` 检查
+4. **东财 push2his K 线全线封禁**：5 分钟 K 线已改为雪球优先，日 K 线腾讯优先+东财兜底
+5. **板块 5 分钟 K 线合成**：通过成分股 Top 3 等权平均生成，不再依赖东财板块指数 API
+6. **K 线日期顺序**：日 K 线按时间正序排列（`[0]` 最早），连板推算从末尾 `[-1]` 往回走
+7. **缓存位置**：日志和结果存储在 `~/Library/Application Support/dragon-quant/`
+8. **提交信息**用中文，Conventional Commits 前缀（`feat:`/`fix:`/`docs:`/`refactor:`）

@@ -1,5 +1,16 @@
 # Changeset
 
+## 2026-05-13
+
+### refactor: 迁移至 dragon-quant pip 包
+
+- 删除全部 `scripts/` 目录（12 个文件），功能已完全由 `dragon-quant` 0.1.0 替代
+- 重写 AGENTS.md：从旧脚本文档迁移为 dragon-quant 包使用指南（CLI + Python API）
+- 重写 README.md：安装方式从 `git clone` 改为 `pip install dragon-quant`，命令改为 `dragon-quant scan` / `dragon-quant logs` / `dragon-quant data`
+- 数据源从 4 源（东财+雪球+新浪+腾讯）精简为 3 源（东财+雪球+腾讯），新浪兜底逻辑已内置到包内
+- 日志排查从 bash one-liner 改为 `dragon-quant logs query/summary` CLI
+- Cookie 管理从 `scripts/xq_cookie_refresh.py` 改为 `dragon-quant data cookie-fetch`
+
 ## 2026-05-06
 
 ### docs: README 重写 — 纯用户视角
@@ -49,4 +60,3 @@
 ### docs: AGENTS.md
 
 - 首次创建，覆盖项目概览、架构、关键函数索引、权重/阈值速查、代码约定、7 个已知坑点
-
