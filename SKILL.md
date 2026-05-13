@@ -104,7 +104,7 @@ dragon-quant data cookie-fetch --source xueqiu  # 只刷新雪球
 
 ## 输出格式
 
-`dragon-quant scan` 输出包含板块涨跌排行、Top N 候选股四维评分表格、自然语言详细报告，以及 `report_text` 字段。**Agent 原样输出即可。**
+`dragon-quant scan` 输出包含板块涨跌排行、Top N 候选股四维评分表格、自然语言详细报告。**Agent 原样输出即可。** 通过 Python API 调用 `dragon_quant.scan()` 时，返回 dict 中的 `report_text` 字段为完整报告文本。
 
 ## Agent 集成指南 — 常见场景
 
@@ -164,13 +164,13 @@ code = "600172"
 kline = get_kline(code, days=30)
 print(f"{code} 最近 30 日 K 线:")
 for k in kline[-5:]:
-    print(f"  {getattr(k, 'time', '?')} | "
+    print(f"  {getattr(k, 'timestamp', '?')} | "
           f"开{getattr(k, 'open', 0):.2f} 收{getattr(k, 'close', 0):.2f} "
           f"涨{getattr(k, 'pct', 0):.2f}%")
 
 quote = get_quote(code)
 if quote:
-    print(f"当前价: {quote.price} | 涨跌幅: {quote.pct}% | 换手率: {getattr(quote, 'turnover', 0):.2f}%")
+    print(f"当前价: {quote.price} | 涨跌幅: {quote.pct}% | 换手率: {getattr(quote, 'turnover_rate', 0):.2f}%")
 ```
 
 ### 场景 4：scan 返回空数据/报错 → 刷新 Cookie
@@ -282,7 +282,7 @@ for q in quotes:
     if q:
         price = getattr(q, 'price', 0)
         pct = getattr(q, 'pct', 0)
-        turnover = getattr(q, 'turnover', 0)
+        turnover = getattr(q, 'turnover_rate', 0)
         volume_ratio = getattr(q, 'volume_ratio', 0)
         print(f"{q.code:8s} {price:8.2f} {pct:+7.2f}% {turnover:7.2f}% {volume_ratio:6.2f}")
 ```
