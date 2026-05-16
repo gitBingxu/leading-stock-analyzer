@@ -18,20 +18,24 @@ description: >
 **禁止 agent 加工 scan 输出。** 这是此 skill 唯一的硬规则。
 
 规则：
-1. 执行 `dragon-quant scan` 后，**原样输出终端结果**，一个字不改
-2. 禁止自行总结、转表格、加点评、加 trading advice、角色扮演
-3. `dragon-quant scan` 输出的 `report_text` 本身就是最终答案
-4. 如果你觉得需要"加点说明" —— **不需要。** 输出原文就好
-5. **违规示例（禁止）**：
+1. 用户要求扫榜/找龙头时，**只执行 CLI**：`dragon-quant scan [--top N]`
+2. CLI 输出什么，agent 就原样贴什么，**一个字不改**
+3. 禁止用 Python API 自己组装/排版 scan 结果再输出 — 那等于自己写表格替代 scan 输出
+4. `dragon-quant scan` 的终端输出本身就是最终答案
+5. 如果你觉得需要"加点说明" —— **不需要。** 输出原文就好
+6. **违规示例（禁止）**：
+   - ❌ 用 `dragon_quant.scan()` Python API 后自己打印/排版
    - ❌ "根据分析..."、"该股..."、"建议关注..."
    - ❌ 自己写表格替代 scan 输出
    - ❌ 只挑"重点"输出
    - ❌ "杨老师点评：..."
 
+**一句话规则：scan 用 CLI，结果原样贴。Python API 只用于排查/数据查询，不用于输出 scan 结果。**
+
 ## 安装
 
 ```bash
-pip install "dragon-quant>=0.1.2"
+pip install "dragon-quant>=0.1.5"
 ```
 
 ## 快速使用
@@ -104,57 +108,74 @@ dragon-quant data cookie-fetch --source xueqiu  # 只刷新雪球
 
 ## 输出格式
 
-`dragon-quant scan` 输出包含板块涨跌排行、Top N 候选股四维评分表格、自然语言详细报告。**Agent 原样输出即可。** 通过 Python API 调用 `dragon_quant.scan()` 时，返回 dict 中的 `report_text` 字段为完整报告文本。
+`dragon-quant scan` 执行后会保存三份文件：
+- 日志：`~/Library/Application\ Support/dragon-quant/logs/scan_YYYYMMDD_HHMMSS.jsonl`
+- 结果 JSON：`~/Library/Application\ Support/dragon-quant/results/scan_results_YYYYMMDD_HHMMSS.json`
+- **可读报告**：`~/Library/Application Support/dragon-quant/results/scan_report_YYYYMMDD_HHMMSS.txt`
+
+**Agent 输出规则：**
+1. 跑完 scan 后，读取 `.txt` 报告文件，**原样贴出全文**，一个字不改
+2. 贴出的内容包含表格（`----` 分隔线）和详细报告，不省略任何行
+3. 贴完即止，不加前后文
+
+## Agent 集成指南 — 渲染报告图片（优先于纯文本输出）
+
+> **重要：** scan 完成后，除了输出终端文本，**必须额外生成一张可视化报告图片**。
+
+### 图片渲染流程（Agent 自动完成，无需用户操作）
+
+1. 跑完 `dragon-quant scan` 后，CLI 会打印结果文件路径（类似 `📊 结果已保存: .../scan_results_YYYYMMDD_HHMMSS.json`）
+2. Agent 运行 LLM 渲染脚本（支持任意 OpenAI 兼容 API，OpenClaw 已内置 Key）：
+
+```bash
+cd ~/.openclaw/workspace/skills/leading-stock-analyzer && python3 llm_render.py
+```
+
+3. 脚本调用 LLM 根据原始数据生成自然语言文案，再渲染为图片，在桌面生成 `龙头日报_LLM_YYYYMMDD.png`
+4. Agent **在回复中原样贴出 scan 终端输出的同时**，最后附加图片
+
+### 依赖检查
+
+如果 Pillow 或 requests 未安装，先安装：
+
+```bash
+pip3 install Pillow requests
+```
+
+### 渲染效果
+
+生成一张深色主题的高清 PNG（3x 分辨率），包含：
+- 标题栏：龙头战法日报 + 日期 + 四维颜色图例
+- 顶部表格：Top 5 四维评分排名（带动性/抗跌性/领涨性/资金承接/综合分）
+- 下方卡片：每只股票的标题（名称+代码+概念+连板+评分） + 四维进度条 + LLM 生成的6行自然语言分析文案
+- 底部脚注：扫描板块数、API 请求统计、耗时
+
+### 重点说明
+
+- 渲染脚本不依赖特定模型，支持 OpenAI / DeepSeek / OpenRouter / Ollama 等任意 OpenAI 兼容 API
+- 通过环境变量 `LLM_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` 配置 Key，`LLM_BASE_URL` + `LLM_MODEL` 覆盖默认值
+- 也支持 `--offline` 离线模式：生成 prompt 文件，由 agent 填好文案后再渲染
 
 ## Agent 集成指南 — 常见场景
 
-### 场景 1：今日龙头扫榜 + 输出报告
+> ⚠️ scan 类场景禁止用 Python API 输出，必须用 CLI。Python API 只用于**内部数据消费**和**排查**。
+
+### 场景 1：输出上次扫描结果（不重新跑）
 
 ```python
-import dragon_quant
+import json
+from pathlib import Path
 
-result = dragon_quant.scan(top_n=5, candidates_n=5, workers=2)
+latest_path = Path.home() / "Library" / "Application Support" / "dragon-quant" / "results" / "latest.json"
 
-print(f"🐉 今日龙头 TOP5 | 耗时 {result['elapsed_s']}s")
-print()
-print(f"{'排名':4s} {'代码':8s} {'名称':8s} {'综合':>6s} {'带动':>6s} {'抗跌':>6s} {'领涨':>6s} {'承接':>6s}")
-print("-" * 56)
-for i, r in enumerate(result["ranking"], 1):
-    dims = r.get("dimensions", {})
-    print(f"{i:4d} {r['code']:8s} {r['name']:8s} "
-          f"{r['composite_score']:6.1f}  "
-          f"{dims.get('drive',{}).get('score',0):6.1f}  "
-          f"{dims.get('anti_drop',{}).get('score',0):6.1f}  "
-          f"{dims.get('leadership',{}).get('score',0):6.1f}  "
-          f"{dims.get('absorption',{}).get('score',0):6.1f}")
-
-print()
-print(result["report_text"])
+if latest_path.exists():
+    data = json.load(latest_path)
+    print(f"上次扫描: {data['timestamp']} | 耗时 {data['elapsed_s']}s")
+else:
+    print("暂无缓存")
 ```
 
-### 场景 2：只取排行数据，不打印（Agent 内部消费）
-
-```python
-import dragon_quant
-
-result = dragon_quant.scan(top_n=10)
-
-for r in result["ranking"]:
-    code = r["code"]
-    name = r["name"]
-    score = r["composite_score"]
-    concepts = r.get("concepts", [])
-    boards = r.get("board_count", 0)
-    if score >= 80:
-        grade = "🐲 龙头"
-    elif score >= 65:
-        grade = "🔥 强票"
-    else:
-        grade = "📊 一般"
-    print(f"{grade} {code} {name} | {boards}连板 | {', '.join(concepts)} | 综合{score}")
-```
-
-### 场景 3：查某只股票的 K 线和实时行情
+### 场景 2：查某只股票的 K 线和实时行情
 
 ```python
 from dragon_quant.data import get_kline, get_minute_kline, get_quote
@@ -173,7 +194,7 @@ if quote:
     print(f"当前价: {quote.price} | 涨跌幅: {quote.pct}% | 换手率: {getattr(quote, 'turnover_rate', 0):.2f}%")
 ```
 
-### 场景 4：scan 返回空数据/报错 → 刷新 Cookie
+### 场景 3：scan 返回空数据或报错 → 刷新 Cookie
 
 ```python
 from dragon_quant.data import cookie_status, fetch_cookies
@@ -194,7 +215,7 @@ result = dragon_quant.scan(top_n=5)
 print(f"扫描成功，{len(result['ranking'])} 只候选")
 ```
 
-### 场景 5：查板块热度（哪个方向最强）
+### 场景 4：查板块热度（哪个方向最强）
 
 ```python
 from dragon_quant.data import get_sector_ranking, get_sector_components
@@ -212,7 +233,7 @@ if sectors:
         print(f"  {s.code} {s.name} | +{s.pct:.2f}%")
 ```
 
-### 场景 6：排查问题 — 查看扫描日志
+### 场景 5：排查问题 — 查看扫描日志
 
 ```python
 from dragon_quant.logging.query import list_logs, tail_logs, query_logs, log_summary
@@ -238,7 +259,7 @@ for e in entries:
     print(f"  {e['category']} → score={e.get('data',{}).get('score',0)}")
 ```
 
-### 场景 7：清理日志
+### 场景 6：清理日志
 
 ```python
 from dragon_quant.logging.query import clear_logs, list_logs
@@ -250,25 +271,7 @@ result = clear_logs(days=3)
 print(f"删除了 {result['cleared']} 个文件 | 保留 {result['kept']} 个")
 ```
 
-### 场景 8：拿上一次扫描结果（无需重新跑）
-
-```python
-import json
-from pathlib import Path
-
-latest_path = Path.home() / "Library" / "Application Support" / "dragon-quant" / "results" / "latest.json"
-
-if latest_path.exists():
-    with open(latest_path) as f:
-        data = json.load(f)
-    print(f"上次扫描: {data['timestamp']} | 耗时 {data['elapsed_s']}s")
-    for r in data["ranking"]:
-        print(f"  {r['code']} {r['name']} — {r['composite_score']}分 — {r.get('board_count', 0)}连板")
-else:
-    print("暂无扫描缓存，运行一次 scan() 即可生成")
-```
-
-### 场景 9：批量获取多只票的行情对比
+### 场景 7：批量获取多只票的行情对比
 
 ```python
 from dragon_quant.data import batch_get_quotes
@@ -289,15 +292,7 @@ for q in quotes:
 
 ## 排查流程
 
-### 用 Python API 排查（推荐）
-
-1. **用户说"为什么失败了？"** → `log_summary()` 看总体；`query_logs(level="error")` 看具体错误
-2. **用户说"为什么这么慢？"** → `log_summary()` 看 phase 耗时；`query_logs(category="api_call")` 找慢 API
-3. **用户说"为什么某票分低？"** → `query_logs(category="scorer", code="600xxx")` 逐维度查看
-4. **用户说"今天运行情况怎么样？"** → `log_summary()` 给概览
-5. **日志不存在** → 说明还没运行过 scan，直接跑一次生成新日志
-
-### 用 CLI 排查
+### 日志查询
 
 ```bash
 dragon-quant logs summary                                    # 总体情况
@@ -310,6 +305,29 @@ dragon-quant logs query --category api_call                   # 全部 API 调�
 
 排查类问题与普通分析不同：**不需要原样输出**。排查时可以解读日志、提供结论和建议。输出格式自由，以可读为准。
 
+### 容错重试流程
+
+scan 跑完后，如果报告显示错误数 > 0，按以下流程处理：
+
+1. **先查错误类型**：`dragon-quant logs query --level error --tail 10`
+
+2. **如果错误是 `Remote end closed connection without response`**（东财拒绝连接）：
+   - 原因：东财 cookie 过期，请求被拒
+   - **修复流程**：
+     a. 刷新 cookie（东财和雪球同时刷新）：`dragon-quant data cookie-fetch`
+     b. 如果 refresh 没有真正更新 cookie（文件时间戳没变），说明 refresh 接口失效，告知用户手动从浏览器复制 cookie
+     c. 刷新后重新跑 scan
+     d. 如果还是失败，加 `--workers 1` 串行模式再试
+
+3. **如果错误是雪球相关的 cookie 类错误**（如 401、验证码、空响应）：
+   - 运行 `dragon-quant data cookie-status` 检查 cookie 状态
+   - 如果过期，运行 `dragon-quant data cookie-fetch` 刷新
+   - 刷新后重新跑 scan
+
+4. **如果错误是超时/超时重试耗尽**：
+   - 非交易时段（非 9:30-15:00）数据源不稳定，结果仅供参考
+   - 交易时段的话，等几分钟后重试即可
+
 ## 注意事项
 
 1. 数据来自东方财富、雪球、腾讯公开接口，不承诺 SLA，高峰期可能超时
@@ -321,13 +339,14 @@ dragon-quant logs query --category api_call                   # 全部 API 调�
 
 ## Cookie 管理
 
-雪球 API 需要浏览器 cookie，过期后自动回退到其他数据源。
+东财和雪球都需要浏览器 cookie 才能访问，`cookie-fetch` 会同时刷新两者的 cookie。
 
 ### Agent 处理流程
 
-1. 先检查状态：`dragon-quant data cookie-status` 或 `from dragon_quant.data import cookie_status`
-2. 如果过期，执行 `dragon-quant data cookie-fetch` 自动刷新
-3. 如果自动刷新失败，告知用户手动从浏览器复制 cookie
+1. 先检查状态：`dragon-quant data cookie-status`
+2. 如果过期，执行 `dragon-quant data cookie-fetch` 自动刷新（东财 + 雪球同时刷新）
+3. 刷新后检查 cookie 文件时间戳是否更新：`ls -la ~/Library/Application\ Support/dragon-quant/cookies/`
+4. 如果文件时间戳没变，说明自动刷新失效，告知用户手动处理
 
 ### Cookie 提取方法（给用户看）
 
